@@ -11,4 +11,20 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Added
 
-- Initial scaffold.
+- `Conn`: id-correlated JSON-RPC over plugin-sdk's newline framing, with one
+  reader goroutine, ids from 1, `Notify`, a default timeout applied only when
+  the context has no deadline, an outbound frame cap (`ErrFrameTooLarge`), and
+  `ErrGone` for every waiter the moment the pipe ends. `Client` is the typed
+  layer over plugin-sdk's structs.
+- `Process`: `Spawn`, `Start`, `Handshake`, `Stop`, `Kill`, with an exact child
+  environment (`InheritEnv` is the opt-in), a fresh process group killed as a
+  group, a bounded redacted stderr tail, and a stop bounded by
+  `UnloadTimeout + ReapTimeout`.
+- `Supervise`: restart through a full handshake with backoff and a budget
+  (`RestartPolicy`, `StableFor`), optional health-based kill, and no child
+  installed after `Stop`.
+- `HealthGate`: on-demand health with a cached verdict.
+- `Tail` and `Redact`, copied from go-mcp's `supervise` package.
+- `guard.Guarded`: panic, budget, caller-cancel and shutdown containment.
+- `pluginhosttest`: the conformance suite (`Run`, `Harness`, `Waive`,
+  requirements R01-R18) and the re-exec fixture plugin.
