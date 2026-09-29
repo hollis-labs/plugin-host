@@ -72,6 +72,11 @@ const (
 	// [EnvSecret] scattered through it, before behaving like echo.
 	BehaviourStderrFlood = "stderr-flood"
 
+	// BehaviourHangOnRestart behaves like echo the first time it starts in a
+	// given EnvDir and like hang-on-init every time after, which is what a
+	// supervisor's restart-in-flight looks like from outside.
+	BehaviourHangOnRestart = "hang-on-restart"
+
 	behaviourSleeper = "sleeper" // the wedge's grandchild
 )
 
@@ -131,6 +136,12 @@ func MaybeRunFixture() {
 	case BehaviourStderrFlood:
 		flood()
 		code = runEcho()
+	case BehaviourHangOnRestart:
+		if startCount() > 1 {
+			code = runRaw(BehaviourHangOnInit)
+		} else {
+			code = runEcho()
+		}
 	case behaviourSleeper:
 		ignoreSignals()
 		select {}
@@ -144,6 +155,23 @@ func writePID(name string) {
 	if dir := os.Getenv(EnvDir); dir != "" {
 		_ = os.WriteFile(filepath.Join(dir, name), []byte(strconv.Itoa(os.Getpid())), 0o600)
 	}
+}
+
+// startCount records this start in EnvDir/starts and returns how many starts
+// that directory has seen, this one included.
+func startCount() int {
+	dir := os.Getenv(EnvDir)
+	if dir == "" {
+		return 1
+	}
+	path := filepath.Join(dir, "starts")
+	n := 0
+	if b, err := os.ReadFile(path); err == nil {
+		n, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+	}
+	n++
+	_ = os.WriteFile(path, []byte(strconv.Itoa(n)), 0o600)
+	return n
 }
 
 func flood() {
