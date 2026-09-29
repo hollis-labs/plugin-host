@@ -81,7 +81,7 @@ type callResult struct {
 	err error
 }
 
-func callAsync(c *Conn, ctx context.Context, method string) <-chan callResult {
+func callAsync(ctx context.Context, c *Conn, method string) <-chan callResult {
 	ch := make(chan callResult, 1)
 	go func() {
 		raw, err := c.Call(ctx, method, nil)
@@ -103,9 +103,9 @@ func await(t *testing.T, ch <-chan callResult) callResult {
 
 func TestConnIDsStartAtOneAndRepliesMayArriveOutOfOrder(t *testing.T) {
 	p := newPeer(t)
-	slow := callAsync(p.conn, context.Background(), "slow")
+	slow := callAsync(context.Background(), p.conn, "slow")
 	r1 := p.request()
-	fast := callAsync(p.conn, context.Background(), "fast")
+	fast := callAsync(context.Background(), p.conn, "fast")
 	r2 := p.request()
 	if r1.ID != 1 || r2.ID != 2 {
 		t.Fatalf("ids = %d, %d; want 1, 2", r1.ID, r2.ID)
@@ -127,7 +127,7 @@ func TestConnIDsStartAtOneAndRepliesMayArriveOutOfOrder(t *testing.T) {
 
 func TestConnPluginErrorIsAnRPCError(t *testing.T) {
 	p := newPeer(t)
-	ch := callAsync(p.conn, context.Background(), "x")
+	ch := callAsync(context.Background(), p.conn, "x")
 	r := p.request()
 	p.raw(`{"jsonrpc":"2.0","id":` + itoa(r.ID) + `,"error":{"code":-32002,"message":"bad"}}`)
 	got := await(t, ch)
@@ -143,13 +143,13 @@ func TestConnPluginErrorIsAnRPCError(t *testing.T) {
 func TestConnCancelledCallLeavesTheConnectionUsableAndDropsTheLateReply(t *testing.T) {
 	p := newPeer(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	abandoned := callAsync(p.conn, ctx, "abandoned")
+	abandoned := callAsync(ctx, p.conn, "abandoned")
 	r1 := p.request()
 	cancel()
 	if got := await(t, abandoned); !errors.Is(got.err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", got.err)
 	}
-	next := callAsync(p.conn, context.Background(), "next")
+	next := callAsync(context.Background(), p.conn, "next")
 	r2 := p.request()
 	p.reply(r1.ID, `"late"`) // nobody waits for it
 	p.reply(r2.ID, `"mine"`)
@@ -161,7 +161,7 @@ func TestConnCancelledCallLeavesTheConnectionUsableAndDropsTheLateReply(t *testi
 func TestConnDefaultTimeoutAppliesOnlyWithoutADeadline(t *testing.T) {
 	p := newPeer(t, WithDefaultTimeout(150*time.Millisecond))
 	start := time.Now()
-	got := await(t, callAsync(p.conn, context.Background(), "hang"))
+	got := await(t, callAsync(context.Background(), p.conn, "hang"))
 	if !errors.Is(got.err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want DeadlineExceeded", got.err)
 	}
@@ -173,7 +173,7 @@ func TestConnDefaultTimeoutAppliesOnlyWithoutADeadline(t *testing.T) {
 	// An explicit, longer deadline is not clipped by the default.
 	ctx, cancel := context.WithTimeout(context.Background(), testWait)
 	defer cancel()
-	ch := callAsync(p.conn, ctx, "slowish")
+	ch := callAsync(ctx, p.conn, "slowish")
 	r := p.request()
 	time.Sleep(400 * time.Millisecond)
 	select {
@@ -196,7 +196,7 @@ func TestConnNegativeDefaultTimeoutMeansNone(t *testing.T) {
 
 func TestConnDropsFramesThatAreNotAnswers(t *testing.T) {
 	p := newPeer(t)
-	ch := callAsync(p.conn, context.Background(), "x")
+	ch := callAsync(context.Background(), p.conn, "x")
 	r := p.request()
 	for _, junk := range []string{
 		`not json at all`,
@@ -229,8 +229,8 @@ func TestConnDropsFramesThatAreNotAnswers(t *testing.T) {
 
 func TestConnEOFFailsEveryWaiterWithErrGoneAtOnce(t *testing.T) {
 	p := newPeer(t)
-	a := callAsync(p.conn, context.Background(), "a")
-	b := callAsync(p.conn, context.Background(), "b")
+	a := callAsync(context.Background(), p.conn, "a")
+	b := callAsync(context.Background(), p.conn, "b")
 	p.request()
 	p.request()
 	_ = p.toConn.Close()
@@ -255,7 +255,7 @@ func TestConnEOFFailsEveryWaiterWithErrGoneAtOnce(t *testing.T) {
 func TestConnDeliversTheFinalFrameWrittenBeforeEOF(t *testing.T) {
 	for range 50 {
 		p := newPeer(t)
-		ch := callAsync(p.conn, context.Background(), "last")
+		ch := callAsync(context.Background(), p.conn, "last")
 		r := p.request()
 		p.reply(r.ID, `"final"`)
 		_ = p.toConn.Close() // EOF right behind the answer
@@ -271,7 +271,7 @@ func TestConnRefusesAnOversizedRequestAndWritesNothing(t *testing.T) {
 	if !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("err = %v, want ErrFrameTooLarge", err)
 	}
-	ch := callAsync(p.conn, context.Background(), "small")
+	ch := callAsync(context.Background(), p.conn, "small")
 	r := p.request()
 	if r.Method != "small" {
 		t.Fatalf("first frame the peer saw was %q; the oversized one was written", r.Method)
@@ -296,7 +296,7 @@ func TestConnNotifyIsIDless(t *testing.T) {
 		t.Fatalf("request = %+v; a notification carries no id", r)
 	}
 	// A following call still gets id 1: notifications do not spend ids.
-	ch := callAsync(p.conn, context.Background(), "x")
+	ch := callAsync(context.Background(), p.conn, "x")
 	if r := p.request(); r.ID != 1 {
 		t.Fatalf("id = %d, want 1", r.ID)
 	}
@@ -305,7 +305,7 @@ func TestConnNotifyIsIDless(t *testing.T) {
 
 func TestConnCloseFailsWaitersAndIsIdempotent(t *testing.T) {
 	p := newPeer(t)
-	ch := callAsync(p.conn, context.Background(), "x")
+	ch := callAsync(context.Background(), p.conn, "x")
 	p.request()
 	if err := p.conn.Close(); err != nil {
 		t.Fatal(err)

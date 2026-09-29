@@ -104,7 +104,7 @@ func NewConn(r io.Reader, w io.Writer, opts ...ConnOption) *Conn {
 
 // Call sends one request and waits for the response with that id.
 //
-// ctx bounds this call and nothing else: cancelling it deregisters the waiter
+// ctx bounds this call and nothing else: canceling it deregisters the waiter
 // and returns ctx's error, and touches neither the connection, the plugin's
 // work, nor any other call. A plugin-reported error comes back as
 // *subprocess.RPCError (use [errors.As]); the pipe ending is [ErrGone].
@@ -274,7 +274,7 @@ func (c *Conn) read() {
 // Anything that is not a response to a pending call is dropped rather than
 // fatal: junk, invalid UTF-8, JSON null, id 0, a frame naming a method (the
 // plugin never initiates), and an id nobody waits for. The last is not even
-// misbehaviour: it is the late reply to a call whose caller gave up. Killing
+// misbehavior: it is the late reply to a call whose caller gave up. Killing
 // the connection over any of these would turn one bad line into an outage.
 func (c *Conn) deliver(line []byte) {
 	var frame struct {

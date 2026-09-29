@@ -62,7 +62,7 @@ type Spec struct {
 
 // InheritEnv returns this process's environment followed by extra entries
 // (a later entry for the same key wins). It is the explicit way to get the
-// inherit-plus-extras behaviour a host may want for [Spec.Env].
+// inherit-plus-extras behavior a host may want for [Spec.Env].
 func InheritEnv(extra ...string) []string {
 	return append(os.Environ(), extra...)
 }

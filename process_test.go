@@ -21,13 +21,13 @@ import (
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
-// fixtureSpec builds a Spec that re-executes this test binary as behaviour.
+// fixtureSpec builds a Spec that re-executes this test binary as behavior.
 // Budgets are short but far above what a healthy fixture needs, so a loaded
 // CI machine does not turn a slow start into a failure.
-func fixtureSpec(t *testing.T, behaviour string, extraEnv ...string) (pluginhost.Spec, string) {
+func fixtureSpec(t *testing.T, behavior string, extraEnv ...string) (pluginhost.Spec, string) {
 	t.Helper()
 	dir := t.TempDir()
-	command, env := pluginhosttest.FixtureCommand(behaviour, dir, extraEnv...)
+	command, env := pluginhosttest.FixtureCommand(behavior, dir, extraEnv...)
 	return pluginhost.Spec{
 		ID:               "fixture",
 		Command:          command,
@@ -39,12 +39,12 @@ func fixtureSpec(t *testing.T, behaviour string, extraEnv ...string) (pluginhost
 	}, dir
 }
 
-func startFixture(t *testing.T, behaviour string, extraEnv ...string) (*pluginhost.Process, string) {
+func startFixture(t *testing.T, behavior string, extraEnv ...string) (*pluginhost.Process, string) {
 	t.Helper()
-	spec, dir := fixtureSpec(t, behaviour, extraEnv...)
+	spec, dir := fixtureSpec(t, behavior, extraEnv...)
 	p, err := pluginhost.Start(context.Background(), spec)
 	if err != nil {
-		t.Fatalf("Start(%s): %v", behaviour, err)
+		t.Fatalf("Start(%s): %v", behavior, err)
 	}
 	t.Cleanup(func() { _ = p.Stop(context.Background()) })
 	return p, dir
@@ -77,7 +77,7 @@ func exists(pid int) bool { return syscall.Kill(pid, 0) == nil }
 
 func readPID(t *testing.T, dir, name string) int {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(dir, name))
+	b, err := os.ReadFile(filepath.Join(dir, name)) //nolint:gosec // a pid file the fixture wrote into t.TempDir()
 	if err != nil {
 		t.Fatalf("read %s: %v", name, err)
 	}
@@ -194,7 +194,7 @@ func TestSpecEnvIsExact(t *testing.T) {
 
 func TestNilEnvMeansEmptyNotInherit(t *testing.T) {
 	spec, _ := fixtureSpec(t, pluginhosttest.BehaviourEcho)
-	// A fixture with no behaviour variable would not act as a fixture, so use
+	// A fixture with no behavior variable would not act as a fixture, so use
 	// the smallest environment that does and check nothing else is added.
 	t.Setenv("PLUGINHOSTTEST_HOST_ONLY", "leak")
 	p, err := pluginhost.Start(context.Background(), spec)
@@ -211,8 +211,8 @@ func TestNilEnvMeansEmptyNotInherit(t *testing.T) {
 
 func TestStartFailuresAreErrorsThatKillAndReapTheChild(t *testing.T) {
 	cases := []struct {
-		behaviour string
-		check     func(t *testing.T, err error)
+		behavior string
+		check    func(t *testing.T, err error)
 	}{
 		{pluginhosttest.BehaviourBadProtocol, func(t *testing.T, err error) {
 			if !errors.Is(err, pluginhost.ErrProtocolMismatch) {
@@ -238,8 +238,8 @@ func TestStartFailuresAreErrorsThatKillAndReapTheChild(t *testing.T) {
 		}},
 	}
 	for _, c := range cases {
-		t.Run(c.behaviour, func(t *testing.T) {
-			spec, dir := fixtureSpec(t, c.behaviour)
+		t.Run(c.behavior, func(t *testing.T) {
+			spec, dir := fixtureSpec(t, c.behavior)
 			p, err := pluginhost.Start(context.Background(), spec)
 			if err == nil {
 				_ = p.Stop(context.Background())
@@ -286,7 +286,7 @@ func TestStartRefusesAnEmptyCommandAndACancelledContext(t *testing.T) {
 	}
 }
 
-func TestCancellingTheStartContextDoesNotKillThePlugin(t *testing.T) {
+func TestCancelingTheStartContextDoesNotKillThePlugin(t *testing.T) {
 	spec, _ := fixtureSpec(t, pluginhosttest.BehaviourEcho)
 	ctx, cancel := context.WithCancel(context.Background())
 	p, err := pluginhost.Start(ctx, spec)
@@ -534,7 +534,7 @@ func TestNotifyReachesThePluginWithoutAnAnswer(t *testing.T) {
 }
 
 func TestStderrIsBoundedAndRedacted(t *testing.T) {
-	const secret = "tok-9f8e7d6c5b4a-SECRET"
+	const secret = "tok-9f8e7d6c5b4a-SECRET" //nolint:gosec // a made-up value planted to prove it is redacted
 	spec, _ := fixtureSpec(t, pluginhosttest.BehaviourStderrFlood, pluginhosttest.EnvSecret+"="+secret)
 	spec.Secrets = []string{secret}
 	spec.StderrBytes = 2048

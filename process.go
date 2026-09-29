@@ -116,7 +116,7 @@ func Spawn(ctx context.Context, s Spec) (*Process, error) {
 // Start is [Spawn] plus [Process.Handshake]. On any failure the child has
 // been killed and reaped: there is no half-started state to reason about.
 //
-// ctx bounds the handshake only. Cancelling it after Start returns does
+// ctx bounds the handshake only. Canceling it after Start returns does
 // nothing to the plugin.
 func Start(ctx context.Context, s Spec) (*Process, error) {
 	p, err := Spawn(ctx, s)

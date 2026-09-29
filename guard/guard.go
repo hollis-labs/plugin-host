@@ -65,7 +65,7 @@ func Guarded[T any](
 	case <-bounded.Done():
 		// One case, not two: bounded derives from ctx, so selecting on both
 		// would race, and the outcomes read differently. A caller that
-		// cancelled did not "exceed its budget".
+		// canceled did not "exceed its budget".
 		if ctx.Err() != nil {
 			return zero, fmt.Errorf("%s: %w", subject, ctx.Err())
 		}

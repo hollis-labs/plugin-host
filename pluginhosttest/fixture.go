@@ -21,18 +21,18 @@ import (
 
 // Environment variables the fixture plugin reads. [FixtureCommand] sets them.
 const (
-	// EnvBehaviour selects the fixture behaviour; MaybeRunFixture is a no-op
+	// EnvBehaviour selects the fixture behavior; MaybeRunFixture is a no-op
 	// when it is unset.
-	EnvBehaviour = "PLUGINHOSTTEST_BEHAVIOUR"
+	EnvBehaviour = "PLUGINHOSTTEST_BEHAVIOUR" //nolint:misspell // the variable name is fixed by the design brief
 	// EnvDir is a directory the fixture writes into: "pid" (its own pid),
 	// "grandchild.pid" (wedge), and "serve-returned" (echo, written after
 	// subprocess.Serve returns, so its presence proves a graceful stop).
 	EnvDir = "PLUGINHOSTTEST_DIR"
-	// EnvSecret is a value the stderr-flood behaviour embeds in its output.
+	// EnvSecret is a value the stderr-flood behavior embeds in its output.
 	EnvSecret = "PLUGINHOSTTEST_SECRET"
 )
 
-// Fixture behaviours. Echo runs the real subprocess.Serve; every other one
+// Fixture behaviors. Echo runs the real subprocess.Serve; every other one
 // is a raw stdio loop, because a hostile plugin is exactly one that does not
 // go through Serve.
 const (
@@ -77,10 +77,10 @@ const (
 	// supervisor's restart-in-flight looks like from outside.
 	BehaviourHangOnRestart = "hang-on-restart"
 
-	behaviourSleeper = "sleeper" // the wedge's grandchild
+	behaviorSleeper = "sleeper" // the wedge's grandchild
 )
 
-// Markers the failing-handshake behaviours print on stderr, for tests that
+// Markers the failing-handshake behaviors print on stderr, for tests that
 // assert the stderr tail reaches the error.
 const (
 	InitFailedMarker = "FIXTURE-INIT-FAILED-MARKER"
@@ -95,17 +95,17 @@ const (
 )
 
 // FixtureCommand returns the executable and exact environment that make a
-// re-execution of the current test binary act as the named fixture behaviour.
+// re-execution of the current test binary act as the named fixture behavior.
 // dir becomes [EnvDir]; extra is appended to the environment. The test
 // binary's TestMain must call [MaybeRunFixture] first.
-func FixtureCommand(behaviour, dir string, extra ...string) (command string, env []string) {
+func FixtureCommand(behavior, dir string, extra ...string) (command string, env []string) {
 	exe, err := os.Executable()
 	if err != nil {
 		exe = os.Args[0]
 	}
 	// GORACE: a race-instrumented binary sleeps one second at exit by
 	// default, which would make every graceful stop look like a slow one.
-	env = []string{EnvBehaviour + "=" + behaviour, "GORACE=atexit_sleep_ms=0"}
+	env = []string{EnvBehaviour + "=" + behavior, "GORACE=atexit_sleep_ms=0"}
 	if dir != "" {
 		env = append(env, EnvDir+"="+dir)
 	}
@@ -124,13 +124,13 @@ func FixtureCommand(behaviour, dir string, extra ...string) (command string, env
 // The fixture is the test binary re-executing itself, so no go build is
 // involved. When it acts as a fixture it never returns.
 func MaybeRunFixture() {
-	behaviour := os.Getenv(EnvBehaviour)
-	if behaviour == "" {
+	behavior := os.Getenv(EnvBehaviour)
+	if behavior == "" {
 		return
 	}
 	writePID("pid")
 	code := 0
-	switch behaviour {
+	switch behavior {
 	case BehaviourEcho:
 		code = runEcho()
 	case BehaviourStderrFlood:
@@ -142,11 +142,11 @@ func MaybeRunFixture() {
 		} else {
 			code = runEcho()
 		}
-	case behaviourSleeper:
+	case behaviorSleeper:
 		ignoreSignals()
 		sleepForever()
 	default:
-		code = runRaw(behaviour)
+		code = runRaw(behavior)
 	}
 	os.Exit(code)
 }
@@ -159,9 +159,13 @@ func sleepForever() {
 	}
 }
 
-func writePID(name string) {
+func writePID(name string) { writeDirFile(name, strconv.Itoa(os.Getpid())) }
+
+// writeDirFile writes name into EnvDir; without one it does nothing. The
+// directory comes from the test that spawned this fixture, never from input.
+func writeDirFile(name, content string) {
 	if dir := os.Getenv(EnvDir); dir != "" {
-		_ = os.WriteFile(filepath.Join(dir, name), []byte(strconv.Itoa(os.Getpid())), 0o600)
+		_ = os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600) //nolint:gosec // test-owned temp dir named by the spawning test
 	}
 }
 
@@ -172,13 +176,12 @@ func startCount() int {
 	if dir == "" {
 		return 1
 	}
-	path := filepath.Join(dir, "starts")
 	n := 0
-	if b, err := os.ReadFile(path); err == nil {
+	if b, err := os.ReadFile(filepath.Join(dir, "starts")); err == nil { //nolint:gosec // test-owned temp dir named by the spawning test
 		n, _ = strconv.Atoi(strings.TrimSpace(string(b)))
 	}
 	n++
-	_ = os.WriteFile(path, []byte(strconv.Itoa(n)), 0o600)
+	writeDirFile("starts", strconv.Itoa(n))
 	return n
 }
 
@@ -211,9 +214,7 @@ func runEcho() int {
 	err := subprocess.Serve(p)
 	// Written only after Serve returned: its presence proves the host ended
 	// the plugin through stdin EOF or SIGTERM, not SIGKILL.
-	if dir := os.Getenv(EnvDir); dir != "" {
-		_ = os.WriteFile(filepath.Join(dir, "serve-returned"), []byte("1"), 0o600)
-	}
+	writeDirFile("serve-returned", "1")
 	if err != nil {
 		return 1
 	}
@@ -342,15 +343,15 @@ func (w *rawWriter) fail(id int64, code int, message string) {
 	w.line(payload)
 }
 
-func runRaw(behaviour string) int {
-	switch behaviour {
+func runRaw(behavior string) int {
+	switch behavior {
 	case BehaviourHangOnInit, BehaviourBadProtocol, BehaviourNoID, BehaviourInitError, BehaviourLoadError,
 		BehaviourCrashOnCall, BehaviourGarbage, BehaviourExitAfterResponse, BehaviourWedge:
 	default:
-		fmt.Fprintf(os.Stderr, "pluginhosttest: unknown fixture behaviour %q\n", behaviour)
+		fmt.Fprintf(os.Stderr, "pluginhosttest: unknown fixture behavior %q\n", behavior)
 		return 2
 	}
-	if behaviour == BehaviourWedge {
+	if behavior == BehaviourWedge {
 		ignoreSignals()
 		startGrandchild()
 	}
@@ -364,12 +365,12 @@ func runRaw(behaviour string) int {
 		}
 		var req rawRequest
 		if len(line) > 0 && json.Unmarshal(line, &req) == nil {
-			if code, exit := handleRaw(behaviour, w, req); exit {
+			if code, exit := handleRaw(behavior, w, req); exit {
 				return code
 			}
 		}
 		if err != nil {
-			if behaviour == BehaviourWedge {
+			if behavior == BehaviourWedge {
 				sleepForever() // stdin EOF is ignored
 			}
 			return 0
@@ -378,13 +379,13 @@ func runRaw(behaviour string) int {
 }
 
 // handleRaw answers one request. It reports whether the fixture exits.
-func handleRaw(behaviour string, w *rawWriter, req rawRequest) (int, bool) {
-	if behaviour == BehaviourHangOnInit {
+func handleRaw(behavior string, w *rawWriter, req rawRequest) (int, bool) {
+	if behavior == BehaviourHangOnInit {
 		return 0, false
 	}
 	switch req.Method {
 	case subprocess.MethodInit:
-		switch behaviour {
+		switch behavior {
 		case BehaviourInitError:
 			fmt.Fprintln(os.Stderr, "fixture: init failed on purpose ("+InitFailedMarker+")")
 			w.fail(req.ID, subprocess.ErrCodeInternal, "init failed on purpose")
@@ -400,7 +401,7 @@ func handleRaw(behaviour string, w *rawWriter, req rawRequest) (int, bool) {
 			return 0, false
 		}
 	case subprocess.MethodLoad:
-		if behaviour == BehaviourLoadError {
+		if behavior == BehaviourLoadError {
 			fmt.Fprintln(os.Stderr, "fixture: load failed on purpose ("+LoadFailedMarker+")")
 			w.fail(req.ID, subprocess.ErrCodeInternal, "load failed on purpose")
 			return 0, false
@@ -408,14 +409,14 @@ func handleRaw(behaviour string, w *rawWriter, req rawRequest) (int, bool) {
 		w.result(req.ID, subprocess.LoadResult{})
 		return 0, false
 	}
-	if behaviour == BehaviourWedge {
+	if behavior == BehaviourWedge {
 		return 0, false // unload included: the wedge answers nothing
 	}
 	if req.Method == subprocess.MethodUnload {
 		w.result(req.ID, map[string]bool{"ok": true})
 		return 0, false
 	}
-	switch behaviour {
+	switch behavior {
 	case BehaviourCrashOnCall:
 		return 3, true
 	case BehaviourGarbage:
@@ -447,12 +448,10 @@ func startGrandchild() {
 		return
 	}
 	cmd := exec.Command(exe) // #nosec G204 -- re-executes this test binary.
-	cmd.Env = []string{EnvBehaviour + "=" + behaviourSleeper}
+	cmd.Env = []string{EnvBehaviour + "=" + behaviorSleeper}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
 		return
 	}
-	if dir := os.Getenv(EnvDir); dir != "" {
-		_ = os.WriteFile(filepath.Join(dir, "grandchild.pid"), []byte(strconv.Itoa(cmd.Process.Pid)), 0o600)
-	}
+	writeDirFile("grandchild.pid", strconv.Itoa(cmd.Process.Pid))
 }

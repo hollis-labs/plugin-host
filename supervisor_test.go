@@ -39,13 +39,13 @@ func (e *events) options(policy pluginhost.RestartPolicy) pluginhost.SuperviseOp
 	}
 }
 
-func fastPolicy(max int) pluginhost.RestartPolicy {
-	return pluginhost.RestartPolicy{MaxRestarts: max, Initial: 30 * time.Millisecond, Max: 100 * time.Millisecond}
+func fastPolicy(restarts int) pluginhost.RestartPolicy {
+	return pluginhost.RestartPolicy{MaxRestarts: restarts, Initial: 30 * time.Millisecond, Max: 100 * time.Millisecond}
 }
 
-func startSupervised(t *testing.T, behaviour string, o pluginhost.SuperviseOptions, extraEnv ...string) (*pluginhost.Supervisor, string) {
+func startSupervised(t *testing.T, behavior string, o pluginhost.SuperviseOptions, extraEnv ...string) (*pluginhost.Supervisor, string) {
 	t.Helper()
-	spec, dir := fixtureSpec(t, behaviour, extraEnv...)
+	spec, dir := fixtureSpec(t, behavior, extraEnv...)
 	sup := pluginhost.Supervise(spec, o)
 	if err := sup.Start(context.Background()); err != nil {
 		t.Fatal(err)

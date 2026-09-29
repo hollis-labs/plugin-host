@@ -11,7 +11,7 @@
 //
 // The fixture is the test binary re-executing itself: the adapter's package
 // calls [MaybeRunFixture] as the first line of TestMain, and [FixtureCommand]
-// builds the command that selects a behaviour. Compliant behaviour runs the
-// real subprocess.Serve; hostile behaviour (hang, crash, garbage, wedge,
+// builds the command that selects a behavior. Compliant behavior runs the
+// real subprocess.Serve; hostile behavior (hang, crash, garbage, wedge,
 // stderr flood) uses a raw stdio loop.
 package pluginhosttest

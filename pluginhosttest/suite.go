@@ -108,7 +108,7 @@ var requirements = []requirement{
 	{"R13", "graceful stop ends without SIGKILL", (*env).r13},
 	{"R14", "stop of a wedged plugin is bounded and kills it", (*env).r14},
 	{"R15", "stop kills the plugin's process group", (*env).r15},
-	{"R16", "cancelling the start context leaves the plugin callable", (*env).r16},
+	{"R16", "canceling the start context leaves the plugin callable", (*env).r16},
 	{"R17", "stderr is bounded and never leaks secrets", (*env).r17},
 	{"R18", "unknown method is -32601, application codes preserved", (*env).r18},
 }
@@ -181,7 +181,7 @@ func (e *env) needPIDs() {
 	}
 }
 
-func (e *env) newCase(behaviour string, secrets []string, extra ...string) Case {
+func (e *env) newCase(behavior string, secrets []string, extra ...string) Case {
 	e.t.Helper()
 	base := e.t.TempDir()
 	c := Case{DataDir: filepath.Join(base, "data"), CacheDir: filepath.Join(base, "cache"), Secrets: secrets}
@@ -190,7 +190,7 @@ func (e *env) newCase(behaviour string, secrets []string, extra ...string) Case 
 			e.t.Fatal(err)
 		}
 	}
-	c.Command, c.Env = FixtureCommand(behaviour, c.DataDir, extra...)
+	c.Command, c.Env = FixtureCommand(behavior, c.DataDir, extra...)
 	e.t.Cleanup(func() { // registered first, so it runs after the graceful stops below
 		for _, name := range []string{"pid", "grandchild.pid"} {
 			if pid, err := readPIDFile(filepath.Join(c.DataDir, name)); err == nil {
@@ -229,24 +229,24 @@ func (e *env) spawn(ctx context.Context, c Case) *spawned {
 	return s
 }
 
-// start spawns behaviour and requires it to come up.
-func (e *env) start(behaviour string, extra ...string) (Instance, Case) {
+// start spawns behavior and requires it to come up.
+func (e *env) start(behavior string) (Instance, Case) {
 	e.t.Helper()
-	c := e.newCase(behaviour, nil, extra...)
+	c := e.newCase(behavior, nil)
 	s := e.spawn(context.Background(), c)
 	if s.err != nil {
-		e.t.Fatalf("Start(%s): %v", behaviour, s.err)
+		e.t.Fatalf("Start(%s): %v", behavior, s.err)
 	}
 	return s.inst, c
 }
 
-// startFails spawns behaviour and requires the start to fail.
-func (e *env) startFails(behaviour string) (*spawned, Case) {
+// startFails spawns behavior and requires the start to fail.
+func (e *env) startFails(behavior string) (*spawned, Case) {
 	e.t.Helper()
-	c := e.newCase(behaviour, nil)
+	c := e.newCase(behavior, nil)
 	s := e.spawn(context.Background(), c)
 	if s.err == nil {
-		e.t.Fatalf("Start(%s) succeeded; it must fail", behaviour)
+		e.t.Fatalf("Start(%s) succeeded; it must fail", behavior)
 	}
 	return s, c
 }
@@ -267,7 +267,7 @@ func (e *env) stopBounded(inst Instance) {
 }
 
 func readPIDFile(path string) (int, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // a pid file under the case's own temp dir
 	if err != nil {
 		return 0, err
 	}
@@ -388,15 +388,15 @@ func (e *env) r04() {
 }
 
 func (e *env) r05() {
-	for _, tc := range []struct{ behaviour, marker string }{
+	for _, tc := range []struct{ behavior, marker string }{
 		{BehaviourInitError, InitFailedMarker},
 		{BehaviourLoadError, LoadFailedMarker},
 	} {
-		s, c := e.startFails(tc.behaviour)
+		s, c := e.startFails(tc.behavior)
 		if !strings.Contains(s.err.Error(), tc.marker) {
-			e.t.Errorf("%s: the error does not carry the plugin's stderr tail (%s): %v", tc.behaviour, tc.marker, s.err)
+			e.t.Errorf("%s: the error does not carry the plugin's stderr tail (%s): %v", tc.behavior, tc.marker, s.err)
 		}
-		e.requireGone(c, "pid", "after "+tc.behaviour)
+		e.requireGone(c, "pid", "after "+tc.behavior)
 	}
 }
 
@@ -492,7 +492,7 @@ func (e *env) r09() {
 		e.t.Fatal("a call to a crashing plugin succeeded")
 	}
 	if !inst.IsGone(err) {
-		e.t.Errorf("the in-flight call failed with %v, which IsGone does not recognise (a timeout is not an answer)", err)
+		e.t.Errorf("the in-flight call failed with %v, which IsGone does not recognize (a timeout is not an answer)", err)
 	}
 	if took := time.Since(start); took > 5*time.Second {
 		e.t.Errorf("the in-flight call took %s to fail", took)
@@ -618,14 +618,14 @@ func (e *env) r16() {
 	time.Sleep(200 * time.Millisecond)
 	select {
 	case <-s.inst.Exited():
-		e.t.Fatal("the plugin died when the context given to Start was cancelled")
+		e.t.Fatal("the plugin died when the context given to Start was canceled")
 	default:
 	}
 	e.mustEcho(s.inst, "after the start context ended", 10*time.Second)
 }
 
 func (e *env) r17() {
-	const secret = "tok-9f8e7d6c5b4a-SECRET-VALUE"
+	const secret = "tok-9f8e7d6c5b4a-SECRET-VALUE" //nolint:gosec // a made-up value the suite plants to prove it is redacted
 	c := e.newCase(BehaviourStderrFlood, []string{secret}, EnvSecret+"="+secret)
 	s := e.spawn(context.Background(), c)
 	if s.err != nil {

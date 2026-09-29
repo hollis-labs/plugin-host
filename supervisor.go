@@ -63,7 +63,8 @@ type Supervisor struct {
 
 // Supervise returns a Supervisor for s. Nothing runs until Start.
 func Supervise(s Spec, o SuperviseOptions) *Supervisor {
-	ctx, cancel := context.WithCancel(context.Background())
+	// cancel is kept on the Supervisor and called by Stop.
+	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // G118: stored, not dropped
 	return &Supervisor{
 		spec: s, opts: o, ctx: ctx, cancel: cancel,
 		stopping: make(chan struct{}), finished: make(chan struct{}),
@@ -125,7 +126,7 @@ func (s *Supervisor) Restarts() int {
 	return s.restarts
 }
 
-// Stop ends supervision and the plugin. A restart in flight is cancelled and
+// Stop ends supervision and the plugin. A restart in flight is canceled and
 // the child it spawned is stopped, never installed: a Stop that races a
 // restart cannot resurrect the plugin. Stop is idempotent.
 func (s *Supervisor) Stop(ctx context.Context) error {
@@ -219,7 +220,7 @@ func (s *Supervisor) restart(crashed *Process, info ExitInfo) (*Process, bool) {
 		case <-timer.C:
 		}
 
-		// s.ctx is cancelled by Stop, which fails a handshake in flight fast.
+		// s.ctx is canceled by Stop, which fails a handshake in flight fast.
 		next, err := Start(s.ctx, s.spec)
 
 		s.mu.Lock()
