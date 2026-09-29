@@ -1,0 +1,30 @@
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Editor scratch
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Local env
+*.local
+.env
+.env.*
+
+# Workspace files — local-only; a committed go.work breaks `go get` for
+# consumers and CI alike
+go.work
+go.work.sum

@@ -1,0 +1,32 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The tagged tree must already contain its CHANGELOG entry (write it
+      # BEFORE cutting the tag). Matches `## v0.5.0 — date`, `## [v0.6.0] —
+      # date` and `## [0.2.0]`.
+      - name: CHANGELOG has a heading for this tag
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          esc=$(printf '%s' "$ver" | sed 's/\./\\./g')
+          if ! grep -Eq "^## \[?v?${esc}\]?([[:space:]]|\$)" CHANGELOG.md; then
+            echo "CHANGELOG.md has no heading for ${GITHUB_REF_NAME}; add it before tagging"
+            exit 1
+          fi
+          VER="$ver" awk 'BEGIN{f=0; v=ENVIRON["VER"]; gsub(/\./, "\\.", v)} /^## /{ if(f) exit; if ($0 ~ "^## \\[?v?" v "\\]?([ ]|$)") f=1 } f' CHANGELOG.md > release-notes.md
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md
