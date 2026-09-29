@@ -144,11 +144,19 @@ func MaybeRunFixture() {
 		}
 	case behaviourSleeper:
 		ignoreSignals()
-		select {}
+		sleepForever()
 	default:
 		code = runRaw(behaviour)
 	}
 	os.Exit(code)
+}
+
+// sleepForever blocks without tripping the runtime's deadlock detector, which
+// a bare select{} would: that kills the process, and a wedge must not die.
+func sleepForever() {
+	for {
+		time.Sleep(time.Hour)
+	}
 }
 
 func writePID(name string) {
@@ -362,7 +370,7 @@ func runRaw(behaviour string) int {
 		}
 		if err != nil {
 			if behaviour == BehaviourWedge {
-				select {} // stdin EOF is ignored
+				sleepForever() // stdin EOF is ignored
 			}
 			return 0
 		}
@@ -421,13 +429,13 @@ func handleRaw(behaviour string, w *rawWriter, req rawRequest) (int, bool) {
 		} {
 			w.line(junk)
 		}
-		w.result(req.ID, map[string]any{"after": "garbage"})
+		w.result(req.ID, map[string]any{"content": map[string]any{"after": "garbage"}})
 		return 0, false
 	case BehaviourExitAfterResponse:
-		w.result(req.ID, map[string]any{"last": "word"})
+		w.result(req.ID, map[string]any{"content": map[string]any{"last": "word"}})
 		return 0, true
 	}
-	w.result(req.ID, map[string]any{"ok": true})
+	w.result(req.ID, map[string]any{"content": map[string]any{"ok": true}})
 	return 0, false
 }
 
