@@ -18,6 +18,10 @@ import (
 const (
 	defaultCallTimeout = 30 * time.Second
 	defaultMaxFrame    = 8 << 20 // plugin-sdk's Serve scanner limit (server.go)
+	// The inbound default is larger on purpose: Serve writes responses with
+	// no cap, so a plugin may legitimately answer with more than the 8 MiB it
+	// can read. The cap exists to bound memory, not to police plugins.
+	defaultMaxInbound = 64 << 20
 )
 
 // Conn is one plugin's JSON-RPC connection over a pair of streams: requests
@@ -37,12 +41,15 @@ const (
 type Conn struct {
 	w io.Writer
 	r io.Reader
-	// br reads r a line at a time with no line limit (bufio.Scanner would cap
-	// it, and a capped reader is a reader that stops).
+	// br reads r in bounded slices; read() assembles lines under maxInbound
+	// (bufio.Scanner would stop reading at its limit, and a stopped reader
+	// is a dead connection).
 	br *bufio.Reader
 
 	defaultTimeout time.Duration
 	maxFrame       int
+	maxInbound     int
+	droppedInbound atomic.Int64
 
 	nextID atomic.Int64
 
@@ -82,6 +89,19 @@ func WithMaxFrame(n int) ConnOption {
 	}
 }
 
+// WithMaxInboundFrame sets the cap on one inbound line (a response). A longer
+// line is discarded as it streams in, never buffered beyond the cap, and
+// counted by [Conn.InboundDropped]; the connection stays up. The default is
+// 64 MiB, above the 8 MiB outbound cap because plugin-sdk's Serve writes
+// responses without a limit. Values below 1 keep the default.
+func WithMaxInboundFrame(n int) ConnOption {
+	return func(c *Conn) {
+		if n > 0 {
+			c.maxInbound = n
+		}
+	}
+}
+
 // NewConn starts the reader goroutine over r and returns the connection.
 // Close ends it by closing r and w when they are [io.Closer]s; otherwise it
 // ends when r reaches EOF.
@@ -92,6 +112,7 @@ func NewConn(r io.Reader, w io.Writer, opts ...ConnOption) *Conn {
 		br:             bufio.NewReaderSize(r, 64*1024),
 		defaultTimeout: defaultCallTimeout,
 		maxFrame:       defaultMaxFrame,
+		maxInbound:     defaultMaxInbound,
 		pending:        map[int64]chan subprocess.RPCResponse{},
 		done:           make(chan struct{}),
 	}
@@ -173,11 +194,23 @@ func (c *Conn) Notify(method string, params any) error {
 	if closed != nil {
 		return fmt.Errorf("pluginhost: notify %s: %w", method, closed)
 	}
-	if err := c.send(context.Background(), subprocess.RPCRequest{JSONRPC: "2.0", Method: method, Params: params}); err != nil {
+	// Like a call, a notification's write is bounded: a plugin that stopped
+	// reading stdin must not hold the write lock forever.
+	ctx := context.Background()
+	if c.defaultTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.defaultTimeout)
+		defer cancel()
+	}
+	if err := c.send(ctx, subprocess.RPCRequest{JSONRPC: "2.0", Method: method, Params: params}); err != nil {
 		return fmt.Errorf("pluginhost: notify %s: %w", method, err)
 	}
 	return nil
 }
+
+// InboundDropped reports how many inbound lines were discarded for exceeding
+// the inbound cap. It is a cheap atomic read, for diagnostics.
+func (c *Conn) InboundDropped() int64 { return c.droppedInbound.Load() }
 
 // Done is closed when the connection can carry no more calls: the reader hit
 // EOF, or Close ran.
@@ -255,11 +288,30 @@ func (c *Conn) read() {
 		}
 		c.fail(ErrGone)
 	}()
+	var line []byte // the line being assembled; nil while discarding
+	discarding := false
 	for {
-		line, err := c.br.ReadBytes('\n')
-		if len(line) > 0 {
+		// ReadSlice hands back at most one buffer's worth. A line longer than
+		// the buffer arrives in pieces (ErrBufferFull), so memory never
+		// depends on how long the plugin's line is.
+		chunk, err := c.br.ReadSlice('\n')
+		full := errors.Is(err, bufio.ErrBufferFull)
+		if !discarding {
+			if len(line)+len(chunk) > c.maxInbound {
+				discarding, line = true, nil
+			} else {
+				line = append(line, chunk...)
+			}
+		}
+		if full {
+			continue
+		}
+		if discarding {
+			c.droppedInbound.Add(1)
+		} else if len(line) > 0 {
 			c.deliver(line)
 		}
+		line, discarding = nil, false
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrClosed) {
 				cause = err

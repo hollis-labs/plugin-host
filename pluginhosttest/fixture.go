@@ -77,6 +77,10 @@ const (
 	// supervisor's restart-in-flight looks like from outside.
 	BehaviourHangOnRestart = "hang-on-restart"
 
+	// BehaviourDeaf completes the handshake and then stops reading stdin
+	// forever, so a host's writes eventually block on a full pipe.
+	BehaviourDeaf = "deaf"
+
 	behaviorSleeper = "sleeper" // the wedge's grandchild
 )
 
@@ -346,7 +350,7 @@ func (w *rawWriter) fail(id int64, code int, message string) {
 func runRaw(behavior string) int {
 	switch behavior {
 	case BehaviourHangOnInit, BehaviourBadProtocol, BehaviourNoID, BehaviourInitError, BehaviourLoadError,
-		BehaviourCrashOnCall, BehaviourGarbage, BehaviourExitAfterResponse, BehaviourWedge:
+		BehaviourCrashOnCall, BehaviourGarbage, BehaviourExitAfterResponse, BehaviourWedge, BehaviourDeaf:
 	default:
 		fmt.Fprintf(os.Stderr, "pluginhosttest: unknown fixture behavior %q\n", behavior)
 		return 2
@@ -407,6 +411,9 @@ func handleRaw(behavior string, w *rawWriter, req rawRequest) (int, bool) {
 			return 0, false
 		}
 		w.result(req.ID, subprocess.LoadResult{})
+		if behavior == BehaviourDeaf {
+			sleepForever()
+		}
 		return 0, false
 	}
 	if behavior == BehaviourWedge {

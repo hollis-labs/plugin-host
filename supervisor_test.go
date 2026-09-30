@@ -5,6 +5,10 @@ package pluginhost_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -386,5 +390,103 @@ func TestHealthGateOverARealPlugin(t *testing.T) {
 	_ = p.Kill()
 	if v := gate.Probe(context.Background()); v.Reachable {
 		t.Fatalf("a dead plugin is unreachable: %+v", v)
+	}
+}
+
+func TestStopDuringTheFirstHandshakeReturnsAndLeavesNothingBehind(t *testing.T) {
+	settle := func(want int) int {
+		var n int
+		for range 100 {
+			runtime.GC()
+			if n = runtime.NumGoroutine(); n <= want {
+				return n
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		return n
+	}
+	// Warm up lazily started runtime goroutines so they are in the baseline.
+	warm, _ := startFixture(t, pluginhosttest.BehaviourEcho)
+	_ = warm.Stop(context.Background())
+	before := settle(0)
+
+	spec, dir := fixtureSpec(t, pluginhosttest.BehaviourHangOnInit) // handshake budget is 10s
+	sup := pluginhost.Supervise(spec, pluginhost.SuperviseOptions{})
+	startErr := make(chan error, 1)
+	go func() { startErr <- sup.Start(context.Background()) }()
+	eventually(t, supervisorWait, "the child to be spawned", func() bool {
+		_, err := os.Stat(filepath.Join(dir, "pid"))
+		return err == nil
+	})
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- sup.Stop(context.Background()) }()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("Stop = %v", err)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("Stop is still blocked while Start's handshake is in flight")
+	}
+	select {
+	case err := <-startErr:
+		if err == nil {
+			t.Fatal("Start succeeded after Stop")
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("Start never returned")
+	}
+	if exists(readPID(t, dir, "pid")) {
+		t.Fatal("the child survived")
+	}
+	if sup.Current() != nil {
+		t.Fatal("a process is still installed")
+	}
+	if err := sup.Stop(context.Background()); err != nil {
+		t.Fatalf("second Stop = %v", err)
+	}
+	if after := settle(before); after > before {
+		t.Fatalf("goroutines: %d before, %d after", before, after)
+	}
+}
+
+func TestNotifyToAPluginThatStoppedReadingIsBoundedAndDoesNotWedgeCalls(t *testing.T) {
+	spec, _ := fixtureSpec(t, pluginhosttest.BehaviourDeaf)
+	spec.ConnOptions = []pluginhost.ConnOption{pluginhost.WithDefaultTimeout(500 * time.Millisecond)}
+	p, err := pluginhost.Start(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Kill, not Stop: Stop sends an unload, which needs the write lock a
+	// regression here would leave held.
+	t.Cleanup(func() { _ = p.Kill() })
+
+	notified := make(chan error, 1)
+	go func() {
+		// Far more than a pipe buffer holds, so the write must block.
+		notified <- p.Client().Conn().Notify(subprocess.MethodEventHandle,
+			subprocess.EventHandleParams{Type: "x", Data: map[string]any{"pad": strings.Repeat("a", 4<<20)}})
+	}()
+	select {
+	case err := <-notified:
+		if err == nil {
+			t.Fatal("Notify to a plugin that reads nothing succeeded")
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("Notify is blocked on a plugin that stopped reading stdin")
+	}
+	callDone := make(chan error, 1)
+	go func() {
+		_, err := p.Client().Health(context.Background())
+		callDone <- err
+	}()
+	select {
+	case err := <-callDone:
+		if err == nil {
+			t.Fatal("a call to a deaf plugin succeeded")
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("a later call deadlocked behind the blocked Notify")
 	}
 }

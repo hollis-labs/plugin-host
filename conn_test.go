@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -345,5 +347,79 @@ func TestCallDecodesAndZeroesAnEmptyResult(t *testing.T) {
 	p.raw(`{"jsonrpc":"2.0","id":` + itoa(r.ID) + `}`)
 	if v := <-ch; v.N != 0 {
 		t.Fatalf("N = %d", v.N)
+	}
+}
+
+func TestConnDiscardsAnOverlongInboundLineAndKeepsTheConnection(t *testing.T) {
+	p := newPeer(t, WithMaxInboundFrame(1024))
+	ch := callAsync(context.Background(), p.conn, "x")
+	r := p.request()
+	// Longer than the cap, and longer than the reader's buffer.
+	p.raw(`{"jsonrpc":"2.0","id":` + itoa(r.ID) + `,"result":"` + strings.Repeat("a", 300<<10) + `"}`)
+	p.reply(r.ID, `"after the flood"`)
+	if got := await(t, ch); got.err != nil || string(got.raw) != `"after the flood"` {
+		t.Fatalf("got %s, %v; the valid reply behind the flood was lost", got.raw, got.err)
+	}
+	if n := p.conn.InboundDropped(); n != 1 {
+		t.Fatalf("InboundDropped = %d, want 1", n)
+	}
+	select {
+	case <-p.conn.Done():
+		t.Fatal("an overlong line closed the connection")
+	default:
+	}
+}
+
+func TestConnInboundMemoryStaysBoundedByTheCapNotTheLine(t *testing.T) {
+	const (
+		flood      = 256 << 20 // a line with no newline for a very long time
+		inboundCap = 1 << 10
+	)
+	pr, pw := io.Pipe()
+	c := NewConn(pr, io.Discard, WithMaxInboundFrame(inboundCap))
+	t.Cleanup(func() { _ = c.Close(); _ = pw.Close() })
+	ch := callAsync(context.Background(), c, "x")
+	time.Sleep(50 * time.Millisecond) // the call is registered as id 1
+
+	runtime.GC()
+	var base runtime.MemStats
+	runtime.ReadMemStats(&base)
+	var peak atomic.Uint64
+	stop := make(chan struct{})
+	sampled := make(chan struct{})
+	go func() {
+		defer close(sampled)
+		var m runtime.MemStats
+		for {
+			runtime.ReadMemStats(&m)
+			if m.HeapAlloc > peak.Load() {
+				peak.Store(m.HeapAlloc)
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}()
+
+	chunk := []byte(strings.Repeat("x", 1<<20))
+	for written := 0; written < flood; written += len(chunk) {
+		if _, err := pw.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, _ = io.WriteString(pw, "\n"+`{"jsonrpc":"2.0","id":1,"result":"ok"}`+"\n")
+	got := await(t, ch)
+	close(stop)
+	<-sampled
+	if got.err != nil || string(got.raw) != `"ok"` {
+		t.Fatalf("got %s, %v", got.raw, got.err)
+	}
+	if grew := int64(peak.Load()) - int64(base.HeapAlloc); grew > 32<<20 {
+		t.Fatalf("heap grew %d MiB while a %d MiB line streamed in", grew>>20, flood>>20)
+	}
+	if c.InboundDropped() != 1 {
+		t.Fatalf("InboundDropped = %d", c.InboundDropped())
 	}
 }

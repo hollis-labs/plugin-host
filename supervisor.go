@@ -56,10 +56,16 @@ type Supervisor struct {
 	started  bool
 	stopped  bool
 
-	stopOnce sync.Once
-	stopping chan struct{}
-	finished chan struct{}
+	stopOnce   sync.Once
+	stopping   chan struct{}
+	finished   chan struct{}
+	finishOnce sync.Once
 }
+
+// finish releases everyone waiting in Stop. It is called by the run loop when
+// it ends and by every path that will never run one, so Stop cannot wait on a
+// loop that does not exist. It is safe to call more than once.
+func (s *Supervisor) finish() { s.finishOnce.Do(func() { close(s.finished) }) }
 
 // Supervise returns a Supervisor for s. Nothing runs until Start.
 func Supervise(s Spec, o SuperviseOptions) *Supervisor {
@@ -87,17 +93,26 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	s.started = true
 	s.mu.Unlock()
 
-	p, err := Start(ctx, s.spec)
+	// A Stop that arrives mid-handshake cancels it instead of waiting it out.
+	hctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(s.ctx, cancel)()
+	p, err := Start(hctx, s.spec)
 	if err != nil {
 		s.mu.Lock()
 		s.started = false
+		stopped := s.stopped
 		s.mu.Unlock()
+		if stopped {
+			s.finish() // Stop saw started and is waiting on a loop that will never run
+		}
 		return err
 	}
 	s.mu.Lock()
 	if s.stopped {
 		s.mu.Unlock()
 		_ = p.Stop(context.Background())
+		s.finish()
 		return errors.New("pluginhost: supervisor is stopped")
 	}
 	s.cur = p
@@ -138,7 +153,7 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 		close(s.stopping)
 		s.cancel()
 		if !started {
-			close(s.finished)
+			s.finish()
 		}
 	})
 	select {
@@ -167,7 +182,7 @@ func (s *Supervisor) isStopping() bool {
 // run is the supervision loop: watch a process, and on an unexpected exit
 // restart it until the budget runs out or Stop is called.
 func (s *Supervisor) run(p *Process) {
-	defer close(s.finished)
+	defer s.finish()
 	startedAt := time.Now()
 	for {
 		if !s.watch(p) {

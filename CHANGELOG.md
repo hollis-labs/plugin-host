@@ -28,3 +28,15 @@ refuses a tag whose CHANGELOG has no heading for it.
 - `guard.Guarded`: panic, budget, caller-cancel and shutdown containment.
 - `pluginhosttest`: the conformance suite (`Run`, `Harness`, `Waive`,
   requirements R01-R18) and the re-exec fixture plugin.
+
+### Fixed
+
+- Inbound lines are capped (`WithMaxInboundFrame`, default 64 MiB). A line over
+  the cap is discarded while streaming in, without being buffered, and counted
+  by `Conn.InboundDropped`; the connection survives. Previously a plugin
+  writing a huge line with no newline grew host memory without bound.
+- `Supervisor.Stop` no longer blocks when it races `Start`'s first handshake:
+  the handshake is cancelled and every `Start` path that will not run the
+  supervision loop releases `Stop`.
+- `Conn.Notify` is bounded by the default call timeout as a write deadline, so
+  a plugin that stops reading stdin cannot hold the write lock indefinitely.
