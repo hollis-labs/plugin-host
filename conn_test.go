@@ -416,8 +416,8 @@ func TestConnInboundMemoryStaysBoundedByTheCapNotTheLine(t *testing.T) {
 	if got.err != nil || string(got.raw) != `"ok"` {
 		t.Fatalf("got %s, %v", got.raw, got.err)
 	}
-	if grew := int64(peak.Load()) - int64(base.HeapAlloc); grew > 32<<20 {
-		t.Fatalf("heap grew %d MiB while a %d MiB line streamed in", grew>>20, flood>>20)
+	if p := peak.Load(); p > base.HeapAlloc && p-base.HeapAlloc > 32<<20 {
+		t.Fatalf("heap grew %d MiB while a %d MiB line streamed in", (p-base.HeapAlloc)>>20, flood>>20)
 	}
 	if c.InboundDropped() != 1 {
 		t.Fatalf("InboundDropped = %d", c.InboundDropped())
