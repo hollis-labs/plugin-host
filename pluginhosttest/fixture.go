@@ -81,6 +81,9 @@ const (
 	// forever, so a host's writes eventually block on a full pipe.
 	BehaviourDeaf = "deaf"
 
+	// BehaviourLoadSkips acknowledges load with one skipped declaration.
+	BehaviourLoadSkips = "load-skips"
+
 	behaviorSleeper = "sleeper" // the wedge's grandchild
 )
 
@@ -135,7 +138,7 @@ func MaybeRunFixture() {
 	writePID("pid")
 	code := 0
 	switch behavior {
-	case BehaviourEcho:
+	case BehaviourEcho, BehaviourLoadSkips:
 		code = runEcho()
 	case BehaviourStderrFlood:
 		flood()
@@ -248,6 +251,9 @@ func (p *echoPlugin) Init(_ context.Context, params subprocess.InitParams) (subp
 
 func (p *echoPlugin) Load(context.Context) (subprocess.LoadResult, error) {
 	p.record(subprocess.MethodLoad)
+	if os.Getenv(EnvBehaviour) == BehaviourLoadSkips {
+		return subprocess.LoadResult{SkippedRegistrations: []subprocess.SkippedRegistration{{Kind: "command", ID: "example", Reason: "fixture opt-out"}}}, nil
+	}
 	return subprocess.LoadResult{}, nil
 }
 

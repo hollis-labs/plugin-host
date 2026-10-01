@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Write the entry for a release here BEFORE cutting its tag: the release workflow
 refuses a tag whose CHANGELOG has no heading for it.
 
+## v0.1.1 — 2026-10-01
+
+### Added
+
+- `Process.LoadInfo` preserves the acknowledgment from a successful handshake,
+  including skipped registrations, without requiring a second load call.
+  Returned registration slices are copied so callers cannot mutate stored state.
+- `pluginhosttest.BehaviourLoadSkips` exercises a plugin's load-time opt-outs.
+
 ## v0.1.0 — 2026-09-29
 
 ### Added

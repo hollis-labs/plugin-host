@@ -654,3 +654,18 @@ func TestDefaultBudgets(t *testing.T) {
 		t.Fatalf("wedge Stop with defaults took %s, want ~2s (unload budget) plus a kill", took)
 	}
 }
+
+func TestLoadInfoRetainsAcknowledgmentWithoutRepeatingLoad(t *testing.T) {
+	p, _ := startFixture(t, pluginhosttest.BehaviourLoadSkips)
+	got := p.LoadInfo()
+	if len(got.SkippedRegistrations) != 1 || got.SkippedRegistrations[0].ID != "example" {
+		t.Fatalf("LoadInfo = %+v", got)
+	}
+	got.SkippedRegistrations[0].ID = "changed-by-caller"
+	if again := p.LoadInfo(); again.SkippedRegistrations[0].ID != "example" {
+		t.Fatalf("caller mutated stored acknowledgment: %+v", again)
+	}
+	if trace := toolAs[[]string](t, p, "trace", nil); !slices.Equal(trace, []string{"plugin/init", "plugin/load"}) {
+		t.Fatalf("handshake repeated: %v", trace)
+	}
+}

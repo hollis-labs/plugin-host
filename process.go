@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -47,10 +48,11 @@ type Process struct {
 
 	exited chan struct{}
 
-	mu   sync.Mutex
-	exit ExitInfo
-	done bool
-	info subprocess.InitResult
+	mu     sync.Mutex
+	exit   ExitInfo
+	done   bool
+	info   subprocess.InitResult
+	loaded subprocess.LoadResult
 
 	stopOnce sync.Once
 	stopErr  error
@@ -193,6 +195,10 @@ func (p *Process) handshake(ctx context.Context) (subprocess.InitResult, subproc
 	if err != nil {
 		return result, loaded, fmt.Errorf("pluginhost: %s: load: %w", label, err)
 	}
+	p.mu.Lock()
+	p.loaded = loaded
+	p.loaded.SkippedRegistrations = slices.Clone(loaded.SkippedRegistrations)
+	p.mu.Unlock()
 	return result, loaded, nil
 }
 
@@ -204,6 +210,17 @@ func (p *Process) Info() subprocess.InitResult {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.info
+}
+
+// LoadInfo returns the acknowledgment from the last successful handshake.
+// Hosts can inspect skipped declarations after Start or a supervised restart
+// without invoking plugin/load a second time. The returned slice is a copy.
+func (p *Process) LoadInfo() subprocess.LoadResult {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	result := p.loaded
+	result.SkippedRegistrations = slices.Clone(result.SkippedRegistrations)
+	return result
 }
 
 // Pid returns the plugin's OS process id (also its process group id on unix).
