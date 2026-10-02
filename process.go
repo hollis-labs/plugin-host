@@ -73,6 +73,14 @@ func Spawn(ctx context.Context, s Spec) (*Process, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("pluginhost: %s: spawn: %w", s.label(), err)
 	}
+	if s.BeforeSpawn != nil {
+		if err := s.BeforeSpawn(ctx); err != nil {
+			return nil, fmt.Errorf("pluginhost: %s: before spawn: %w", s.label(), err)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("pluginhost: %s: spawn: %w", s.label(), err)
+		}
+	}
 	s = s.normalized()
 
 	// Deliberately not exec.CommandContext; see the Process doc.

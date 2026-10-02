@@ -1,6 +1,7 @@
 package pluginhost
 
 import (
+	"context"
 	"os"
 	"strings"
 	"time"
@@ -26,6 +27,13 @@ type Spec struct {
 	Command string
 	Args    []string
 	Dir     string
+
+	// BeforeSpawn runs the host's validation immediately before every spawn,
+	// including supervised restarts. A refusal leaves no child. It must honor
+	// ctx so cancellation and supervisor shutdown can interrupt validation.
+	// The callback owns policy; the library neither interprets it nor grants
+	// permissions. Errors are returned to the host with wrapping intact.
+	BeforeSpawn func(context.Context) error
 
 	// Env is the child's EXACT environment. Nil means empty: the library
 	// never inherits the host's environment implicitly, because an implicit

@@ -7,6 +7,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Write the entry for a release here BEFORE cutting its tag: the release workflow
 refuses a tag whose CHANGELOG has no heading for it.
 
+## v0.1.2 — 2026-10-02
+
+### Added
+
+- `Spec.BeforeSpawn` allows a host to verify its approved bundle before every
+  child launch, including supervised restart attempts. A refused check spawns
+  nothing, preserves the error chain, and receives the cancellable launch context.
+
 ## v0.1.1 — 2026-10-01
 
 ### Added
