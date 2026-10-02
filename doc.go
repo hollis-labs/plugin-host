@@ -19,7 +19,8 @@
 //
 // Trust, capability grants, secrets, manifests and where plugins come from
 // are not here. [Spec] passes Env, Init.Config and Init.Granted through
-// untouched, so a host that keeps secrets in the environment (and sends an
+// untouched. Spec.BeforeSpawn carries a host validation hook through every
+// spawn and supervised restart; a refusal leaves no child. A host that keeps secrets in the environment (and sends an
 // empty Config) and a host that resolves them into Config (and keeps the
 // environment bare) are both expressible; the library chooses neither.
 //
