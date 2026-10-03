@@ -308,7 +308,7 @@ func (l *Lifecycle) begin(ctx context.Context, rev uint64, enabling bool) (conte
 	if l.revision != rev || (!enabling && !l.status.DesiredEnabled) {
 		return nil, nil, ErrDisabled
 	}
-	if l.quarantined() && !(enabling && l.current != nil && l.current.epoch == l.revision && l.status.State == StateRunning) {
+	if l.quarantined() && (!enabling || l.current == nil || l.current.epoch != l.revision || l.status.State != StateRunning) {
 		return nil, nil, ErrQuarantined
 	}
 	if err := ctx.Err(); err != nil {

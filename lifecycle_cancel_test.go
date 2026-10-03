@@ -38,7 +38,7 @@ func TestCooperativeCancellationNeedsNoAcknowledgement(t *testing.T) {
 			<-entered
 			_ = l.Disable(context.Background())
 			if !errors.Is(awaitResult(t, done), context.Canceled) {
-				t.Fatal("cancelled load succeeded")
+				t.Fatal("canceled load succeeded")
 			}
 
 			if l.Status().State != pluginhost.StateDisabled {
