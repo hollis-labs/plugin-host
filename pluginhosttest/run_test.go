@@ -26,7 +26,7 @@ type harness struct{ spec func(*pluginhost.Spec) }
 func (h harness) Start(ctx context.Context, c pluginhosttest.Case) (pluginhosttest.Instance, error) {
 	spec := pluginhost.Spec{
 		ID: "conformance", Command: c.Command, Args: c.Args, Env: c.Env,
-		Init:    subprocess.InitParams{DataDir: c.DataDir, CacheDir: c.CacheDir},
+		Init:    pluginhosttest.FixtureInit(c.DataDir, c.CacheDir),
 		Secrets: c.Secrets,
 	}
 	if h.spec != nil {

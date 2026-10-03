@@ -26,16 +26,29 @@ import (
 
 	pluginhost "github.com/hollis-labs/plugin-host"
 	"github.com/hollis-labs/plugin-sdk/subprocess"
+	"github.com/hollis-labs/plugin-sdk/capability"
 )
 
 func main() {
 	ctx := context.Background()
+	hostEpoch, err := pluginhost.NewHostInstance()
+	if err != nil { log.Fatal(err) }
+	generations := &pluginhost.MemoryGenerationStore{}
+	generation, err := generations.Next(ctx, hostEpoch, "hello")
+	if err != nil { log.Fatal(err) }
 
-	// The plugin is any executable that calls subprocess.Serve.
+	// Issue hostEpoch once per host process and persist a fresh generation
+	// before this spawn. The plugin executable calls subprocess.Serve.
 	p, err := pluginhost.Start(ctx, pluginhost.Spec{
 		ID:      "hello",
 		Command: os.Args[1],
-		Env:     pluginhost.InheritEnv(), // the child's environment is exact; inheriting is opt-in
+		Env:     pluginhost.InheritEnv(), // inheriting is opt-in
+		Init: subprocess.InitParams{
+			PluginDir: "/plugins/hello", DataDir: "/data/hello", CacheDir: "/cache/hello",
+			HostInfo: subprocess.HostInfo{Version: "1.0.0", Protocol: subprocess.ProtocolVersion},
+			Incarnation: capability.RuntimeIdentity{HostInstance: hostEpoch, OwnerID: "hello", OwnerGeneration: generation},
+			Grants: capability.GrantSet{},
+		},
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -57,11 +70,11 @@ func main() {
 }
 ```
 
-`Start` spawns the process, runs `plugin/init` then `plugin/load`, and returns a `*Process`. `Spawn` is the same without the handshake, for a host that builds its own `plugin/init` (for example with resolved secrets in `Config`). `Supervise` wraps a `Spec` and restarts explicitly classified transient exits through a full handshake with backoff. `Lifecycle` adds staged planning, generation-owned enable/disable/reload and cleanup callbacks; see [the lifecycle contract](docs/lifecycle.md). `guard.Guarded` runs an in-process plugin call under a panic and budget guard.
+`Start` spawns the process, runs `plugin/init` then `plugin/load`, and returns a `*Process`. `Spawn` validates the complete SDK Init payload before starting a child, leaving the handshake to the host. Required directories, host version and incarnation must be provided. Zero protocol/contract default to 2/1, config defaults to `{}`, and nil grants encode as `[]`. `Supervise` wraps a `Spec` and restarts explicitly classified transient exits through a full handshake with backoff. `Lifecycle` adds staged planning, generation-owned enable/disable/reload and cleanup callbacks; see [the lifecycle contract](docs/lifecycle.md). `guard.Guarded` runs an in-process plugin call under a panic and budget guard.
 
 ## Compatibility
 
-The wire protocol is plugin-sdk's `subprocess.ProtocolVersion`, currently 1, and the handshake is exact: a plugin answering another protocol fails `Start`. A plugin-sdk `ProtocolVersion` bump is a major version change here. The module requires `go 1.26.6`, so a consumer must be at Go 1.26.6 or newer, and depends on plugin-sdk v0.5.0 and the standard library, nothing else. The process-group kill is unix-only; other platforms fall back to killing the one process, and a plugin that forks leaves its helpers behind there.
+The wire protocol is plugin-sdk's `subprocess.ProtocolVersion`, currently 2, and the handshake is exact: a plugin answering another protocol fails `Start`. Protocol-1 plugins fail with a typed load-stage protocol failure; there is no fallback. Init acknowledges capability contract 1 and exact identity/version before load. Optional host services/hooks are unimplemented; valid supplied offers can be visibly declined, but positive acknowledgements fail before load. A plugin-sdk `ProtocolVersion` bump is a major version change here. The module requires `go 1.26.6`, so a consumer must be at Go 1.26.6 or newer, and depends on plugin-sdk and the standard library. The process-group kill is unix-only; other platforms fall back to killing the one process, and a plugin that forks leaves its helpers behind there.
 
 The exported API is pre-1.0 and unreleased; see [CHANGELOG.md](./CHANGELOG.md).
 
@@ -69,7 +82,7 @@ The exported API is pre-1.0 and unreleased; see [CHANGELOG.md](./CHANGELOG.md).
 
 - Registry, trust tiers, signature verification, catalogs and installers.
 - Manifests and `plugin.yaml`, in any dialect.
-- Capability vocabularies and grants: `Spec.Init.Granted` is passed through untouched.
+- Capability policy and enforcement: SDK `Spec.Init.Grants` is structurally validated and passed through; discovery grants do not authorize operations.
 - Secret resolution and secret stores: `Spec.Env` and `Spec.Init.Config` are the host's.
 - Hosting compiled-in plugins (only the small `guard` package for panic and budget containment).
 - CRUD-to-HTTP glue and any typed `mcp/list_tools`: plugin-sdk's `Serve` does not answer that method, so the library exposes only the raw `Conn.Call`.
@@ -90,3 +103,8 @@ CI (`.github/workflows/check.yml`) is the full gate.
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+Frames default to 8 MiB including LF in both directions. Oversized incoming
+lines are discarded without losing the connection; offers cannot advertise a
+larger frame. Lifecycle methods send absent or empty params, never null. The
+SDK is pinned by pseudo-version until the first plugin-mcp tag.

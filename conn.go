@@ -17,11 +17,8 @@ import (
 
 const (
 	defaultCallTimeout = 30 * time.Second
-	defaultMaxFrame    = 8 << 20 // plugin-sdk's Serve scanner limit (server.go)
-	// The inbound default is larger on purpose: Serve writes responses with
-	// no cap, so a plugin may legitimately answer with more than the 8 MiB it
-	// can read. The cap exists to bound memory, not to police plugins.
-	defaultMaxInbound = 64 << 20
+	defaultMaxFrame    = 8 << 20         // plugin-sdk's Serve scanner limit (server.go)
+	defaultMaxInbound  = defaultMaxFrame // base-profile limit includes LF
 )
 
 // Conn is one plugin's JSON-RPC connection over a pair of streams: requests
@@ -29,8 +26,7 @@ const (
 // stdio framing). It owns framing and correlation. It owns neither a process
 // nor its lifecycle; see [Process] for that.
 //
-// Every call gets a monotonic id starting at 1 (id 0 is a notification in the
-// protocol) and registers a waiter under it. A single reader goroutine routes
+// Every call gets a monotonic id starting at 1 (notifications omit id) and registers a waiter under it. A single reader goroutine routes
 // each response to the waiter that asked for it, so replies may arrive in any
 // order, a slow call delays only itself, and a caller that gives up costs one
 // call rather than the connection: it deregisters its own waiter and the late
@@ -92,8 +88,7 @@ func WithMaxFrame(n int) ConnOption {
 // WithMaxInboundFrame sets the cap on one inbound line (a response). A longer
 // line is discarded as it streams in, never buffered beyond the cap, and
 // counted by [Conn.InboundDropped]; the connection stays up. The default is
-// 64 MiB, above the 8 MiB outbound cap because plugin-sdk's Serve writes
-// responses without a limit. Values below 1 keep the default.
+// 8 MiB including LF, matching the outbound base-profile cap. Values below 1 keep the default.
 func WithMaxInboundFrame(n int) ConnOption {
 	return func(c *Conn) {
 		if n > 0 {

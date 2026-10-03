@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hollis-labs/plugin-sdk/capability"
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
@@ -17,7 +18,7 @@ const (
 )
 
 // Spec is what the host needs to spawn one plugin. The library passes Env,
-// Init.Config and Init.Granted through untouched: what a plugin may see,
+// Init.Config and Init.Grants through untouched: what a plugin may see,
 // hold or be granted is the host's decision, not this library's.
 type Spec struct {
 	// ID names the plugin in errors before the child has introduced itself.
@@ -46,8 +47,8 @@ type Spec struct {
 	Env []string
 
 	// Init is the plugin/init payload, owned by the host verbatim: Config,
-	// Granted, HostInfo.Version and the directories. The library fills only
-	// what is zero: HostInfo.Protocol = 1, Config = {} (never null),
+	// Grants, Incarnation, HostInfo.Version and the directories. The library fills only
+	// what is zero: HostInfo.Protocol = 2, CapabilityContract = 1, Config = {} (never null),
 	// LogLevel = "info", PluginDir = Dir.
 	Init subprocess.InitParams
 
@@ -98,6 +99,9 @@ func (s Spec) normalized() Spec {
 	}
 	if s.Init.HostInfo.Protocol == 0 {
 		s.Init.HostInfo.Protocol = subprocess.ProtocolVersion
+	}
+	if s.Init.CapabilityContract == 0 {
+		s.Init.CapabilityContract = capability.ContractVersion
 	}
 	if s.Init.Config == nil {
 		s.Init.Config = map[string]string{}

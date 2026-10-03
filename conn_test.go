@@ -423,3 +423,62 @@ func TestConnInboundMemoryStaysBoundedByTheCapNotTheLine(t *testing.T) {
 		t.Fatalf("InboundDropped = %d", c.InboundDropped())
 	}
 }
+
+// wireWriter lets the test inspect the encoded params before decoding can
+// erase the distinction between absent params and JSON null.
+type wireWriter func([]byte) (int, error)
+
+func (w wireWriter) Write(b []byte) (int, error) { return w(b) }
+
+func TestLifecycleCallsDoNotEncodeNullParams(t *testing.T) {
+	reader, reply := io.Pipe()
+	requests := make(chan map[string]json.RawMessage, 3)
+	c := NewConn(reader, wireWriter(func(b []byte) (int, error) {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(b, &fields); err != nil {
+			return 0, err
+		}
+		requests <- fields
+		response := append([]byte(`{"jsonrpc":"2.0","id":`), fields["id"]...)
+		response = append(response, []byte(`,"result":{"ok":true}}`+"\n")...)
+		if _, err := reply.Write(response); err != nil {
+			return 0, err
+		}
+		return len(b), nil
+	}))
+	t.Cleanup(func() { _ = c.Close(); _ = reply.Close() })
+	client := NewClient(c)
+	if _, err := client.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Health(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Unload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		fields := <-requests
+		if params, exists := fields["params"]; exists && string(params) != "{}" {
+			t.Fatalf("lifecycle method %s sent params %s", fields["method"], params)
+		}
+	}
+}
+
+func TestDefaultInboundCapDropsOversizedFrameAndKeepsConnection(t *testing.T) {
+	p := newPeer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { _, err := p.conn.Call(ctx, "large", nil); result <- err }()
+	req := p.request()
+	p.reply(req.ID, `"`+strings.Repeat("x", 8<<20)+`"`)
+	// A valid following response must still correlate after the oversized line.
+	p.reply(req.ID, `true`)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	if p.conn.InboundDropped() != 1 {
+		t.Fatal("default inbound cap did not drop oversized frame")
+	}
+}

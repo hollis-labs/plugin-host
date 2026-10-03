@@ -16,6 +16,7 @@ import (
 	"time"
 
 	plugin "github.com/hollis-labs/plugin-sdk"
+	"github.com/hollis-labs/plugin-sdk/capability"
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
@@ -44,8 +45,14 @@ const (
 	BehaviourEcho = "echo"
 	// BehaviourHangOnInit reads its stdin and never answers.
 	BehaviourHangOnInit = "hang-on-init"
-	// BehaviourBadProtocol answers init with protocol 2.
+	// BehaviourBadProtocol answers with a legacy protocol-1 result.
 	BehaviourBadProtocol = "bad-protocol"
+	// BehaviourBadContract acknowledges an unsupported capability contract.
+	BehaviourBadContract = "bad-contract"
+	// BehaviourProfileAck claims reverse services the driver cannot provide.
+	BehaviourProfileAck = "profile-ack"
+	// BehaviourDuplicateInit returns a duplicate security field.
+	BehaviourDuplicateInit = "duplicate-init"
 	// BehaviourNoID answers init with an empty plugin id.
 	BehaviourNoID = "no-id"
 	// BehaviourInitError answers init with an error, after printing
@@ -264,7 +271,7 @@ func (p *echoPlugin) Init(_ context.Context, params subprocess.InitParams) (subp
 	p.mu.Lock()
 	p.init = params
 	p.mu.Unlock()
-	return subprocess.InitResult{ID: "fixture", Name: "Fixture", Version: "1.0.0", Protocol: subprocess.ProtocolVersion}, nil
+	return subprocess.InitResult{ID: "fixture", Name: "Fixture", Version: "1.0.0", Protocol: subprocess.ProtocolVersion, CapabilityContract: capability.ContractVersion}, nil
 }
 
 func (p *echoPlugin) Load(context.Context) (subprocess.LoadResult, error) {
@@ -373,7 +380,7 @@ func (w *rawWriter) fail(id int64, code int, message string) {
 
 func runRaw(behavior string) int {
 	switch behavior {
-	case BehaviourHangOnInit, BehaviourBadProtocol, BehaviourNoID, BehaviourInitError, BehaviourLoadError,
+	case BehaviourHangOnInit, BehaviourBadProtocol, BehaviourBadContract, BehaviourProfileAck, BehaviourDuplicateInit, BehaviourNoID, BehaviourInitError, BehaviourLoadError,
 		BehaviourCrashOnCall, BehaviourGarbage, BehaviourExitAfterResponse, BehaviourWedge, BehaviourDeaf, BehaviourUnloadError, BehaviourWrongID:
 	default:
 		fmt.Fprintf(os.Stderr, "pluginhosttest: unknown fixture behavior %q\n", behavior)
@@ -419,16 +426,25 @@ func handleRaw(behavior string, w *rawWriter, req rawRequest) (int, bool) {
 			w.fail(req.ID, subprocess.ErrCodeInternal, "init failed on purpose")
 			return 0, false
 		case BehaviourBadProtocol:
-			w.result(req.ID, subprocess.InitResult{ID: "fixture", Name: "Fixture", Version: "1.0.0", Protocol: 2})
+			w.result(req.ID, map[string]any{"id": "fixture", "name": "Fixture", "version": "1.0.0", "protocol": 1})
+			return 0, false
+		case BehaviourBadContract:
+			w.result(req.ID, map[string]any{"id": "fixture", "name": "Fixture", "version": "1.0.0", "description": "", "protocol": 2, "capability_contract": 2})
+			return 0, false
+		case BehaviourProfileAck:
+			w.result(req.ID, map[string]any{"id": "fixture", "name": "Fixture", "version": "1.0.0", "description": "", "protocol": 2, "capability_contract": 1, "reverse_rpc_version": 1})
+			return 0, false
+		case BehaviourDuplicateInit:
+			w.line([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"id":"fixture","name":"Fixture","version":"1.0.0","description":"","protocol":2,"protocol":2,"capability_contract":1}}`, req.ID)))
 			return 0, false
 		case BehaviourWrongID:
-			w.result(req.ID, subprocess.InitResult{ID: "other", Name: "Other", Version: "1.0.0", Protocol: subprocess.ProtocolVersion})
+			w.result(req.ID, subprocess.InitResult{ID: "other", Name: "Other", Version: "1.0.0", Protocol: subprocess.ProtocolVersion, CapabilityContract: capability.ContractVersion})
 			return 0, false
 		case BehaviourNoID:
-			w.result(req.ID, subprocess.InitResult{Name: "Fixture", Version: "1.0.0", Protocol: subprocess.ProtocolVersion})
+			w.result(req.ID, map[string]any{"id": "", "name": "Fixture", "version": "1.0.0", "description": "", "protocol": subprocess.ProtocolVersion, "capability_contract": capability.ContractVersion})
 			return 0, false
 		default:
-			w.result(req.ID, subprocess.InitResult{ID: "fixture", Name: "Fixture", Version: "1.0.0", Protocol: subprocess.ProtocolVersion})
+			w.result(req.ID, subprocess.InitResult{ID: "fixture", Name: "Fixture", Version: "1.0.0", Protocol: subprocess.ProtocolVersion, CapabilityContract: capability.ContractVersion})
 			return 0, false
 		}
 	case subprocess.MethodLoad:
@@ -492,4 +508,12 @@ func startGrandchild() {
 		return
 	}
 	writeDirFile("grandchild.pid", strconv.Itoa(cmd.Process.Pid))
+}
+
+// FixtureInit is a complete protocol-2 payload for the test fixture. Its tuple
+// is test-only; real hosts supply their own persisted incarnation and grants.
+func FixtureInit(dataDir, cacheDir string) subprocess.InitParams {
+	return subprocess.InitParams{PluginDir: dataDir, DataDir: dataDir, CacheDir: cacheDir,
+		Config: map[string]string{}, LogLevel: "info", HostInfo: subprocess.HostInfo{Version: "1.0.0", Protocol: subprocess.ProtocolVersion},
+		CapabilityContract: capability.ContractVersion, Incarnation: capability.RuntimeIdentity{HostInstance: "fixture-host", OwnerID: "fixture", OwnerGeneration: 1}, Grants: capability.GrantSet{}}
 }

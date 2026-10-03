@@ -253,7 +253,7 @@ func TestProcessFailureDiagnosticsPreserveCausesAndRedact(t *testing.T) {
 	}
 	bad, _ := fixtureSpec(t, pluginhosttest.BehaviourBadProtocol)
 	_, err = pluginhost.Start(context.Background(), bad)
-	if !errors.Is(err, pluginhost.ErrProtocolMismatch) || !strings.Contains(err.Error(), "speaks 2") {
+	if !errors.Is(err, pluginhost.ErrProtocolMismatch) || !strings.Contains(err.Error(), "speaks 1") {
 		t.Fatal("protocol diagnostic lost", err)
 	}
 }

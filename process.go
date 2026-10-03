@@ -74,6 +74,10 @@ func Spawn(ctx context.Context, s Spec) (*Process, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("pluginhost: %s: spawn: %w", s.label(), err)
 	}
+	s = snapshotSpec(s.normalized())
+	if err := validateInit(s); err != nil {
+		return nil, err
+	}
 	if s.BeforeSpawn != nil {
 		if err := s.BeforeSpawn(ctx); err != nil {
 			return nil, fmt.Errorf("pluginhost: %s: before spawn: %w", s.label(), err)
@@ -82,7 +86,6 @@ func Spawn(ctx context.Context, s Spec) (*Process, error) {
 			return nil, fmt.Errorf("pluginhost: %s: spawn: %w", s.label(), err)
 		}
 	}
-	s = s.normalized()
 
 	// Deliberately not exec.CommandContext; see the Process doc.
 	cmd := exec.Command(s.Command, s.Args...) // #nosec G204 -- the command is host configuration, not caller input.
@@ -132,6 +135,10 @@ func Spawn(ctx context.Context, s Spec) (*Process, error) {
 func Start(ctx context.Context, s Spec) (*Process, error) {
 	p, err := Spawn(ctx, s)
 	if err != nil {
+		var failure *Failure
+		if errors.As(err, &failure) {
+			return nil, err
+		}
 		return nil, processFailure(s, "spawn", err)
 	}
 	if _, _, err := p.Handshake(ctx); err != nil {
@@ -165,7 +172,7 @@ func (p *Process) wait() {
 
 // Handshake runs plugin/init, checks the answer, then runs plugin/load.
 //
-// The answer must name protocol 1 exactly (no range negotiation) and a
+// The answer must name protocol 2 and capability contract 1 exactly (no range negotiation) and a
 // non-empty plugin id. The whole handshake is bounded by
 // Spec.HandshakeTimeout even when ctx has no deadline. On failure the child
 // is killed and reaped and the error carries the plugin's redacted stderr
@@ -202,12 +209,20 @@ func (p *Process) handshake(ctx context.Context) (subprocess.InitResult, subproc
 func (p *Process) initialize(ctx context.Context) (subprocess.InitResult, error) {
 	result, err := p.client.Init(ctx, p.spec.Init)
 	if err != nil {
-		return result, processFailure(p.spec, "init", err)
+		return result, initFailure(p.spec, err)
 	}
 	return result, nil
 }
 
 func (p *Process) verify(result subprocess.InitResult) error {
+	if err := subprocess.ValidateInitResult(p.spec.Init, result); err != nil {
+		return initFailure(p.spec, err)
+	}
+	// This driver has no reverse or hooks implementation. A valid offer may
+	// be declined, but an acknowledgement cannot activate unsupported services.
+	if result.ReverseRPCVersion != nil || result.HooksProfileVersion != nil {
+		return initFailure(p.spec, &subprocess.InitError{Code: subprocess.InitProfileMismatch, Field: "unsupported_profile", Expected: 0, Received: 1})
+	}
 	if result.Protocol != subprocess.ProtocolVersion {
 		return processFailure(p.spec, "protocol", fmt.Errorf("%w: plugin speaks %d, host speaks %d", ErrProtocolMismatch, result.Protocol, subprocess.ProtocolVersion))
 	}

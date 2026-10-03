@@ -25,11 +25,19 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Changed
 
+- Pin protocol 2 to the SDK pseudo-version until the first plugin-mcp tag.
+- Default frames are 8 MiB including LF in both directions; profile offers
+  cannot advertise a larger frame. Lifecycle methods omit params or send {}.
+
 - Cooperative cancellation receives a bounded grace before pending quarantine;
   reload preflight timeouts preserve the serving generation and failure status.
 - BeforeDisable and Supervisor classification are bounded; snapshot revisions
   fail closed at exhaustion. Exact report acknowledgement and revision conflicts
   have dedicated regressions and documented host storage requirements.
+- Adopt SDK protocol 2 Init/Grant types directly. Validate/encode the complete
+  Init before spawn, bind lifecycle incarnation/grants to each issued tuple, and
+  validate acknowledgements before load. Protocol 1 has no fallback; optional
+  reverse/hooks profile acknowledgements are refused until implemented.
 
 - Unexpected exits are terminal unless explicitly classified transient;
   standalone Supervisor requires `ClassifyExit`. Failed restart handshakes

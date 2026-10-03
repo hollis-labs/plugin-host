@@ -7,11 +7,13 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/hollis-labs/plugin-sdk/capability"
 )
 
 // MaxOwnerGeneration is the largest integer represented exactly by Go/JS
 // authority DTOs. Exhaustion fails closed; never wrap or reuse a generation.
-const MaxOwnerGeneration uint64 = 9007199254740991
+const MaxOwnerGeneration uint64 = capability.MaxSafeInteger
 
 // MaxLifecycleRevision bounds persisted snapshot ordering; exhaustion fails closed.
 const MaxLifecycleRevision uint64 = MaxOwnerGeneration

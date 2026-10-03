@@ -39,7 +39,7 @@ func TestEnableBarrierPrecedesDisableGate(t *testing.T) {
 	}
 	dir := t.TempDir()
 	l, err := NewLifecycle("fixture", LifecycleOptions{HostInstance: epoch, Generations: &MemoryGenerationStore{}, Callbacks: LifecycleCallbacks{Plan: func(context.Context) (Plan, error) {
-		return Plan{Spec: Spec{ID: "fixture", ExpectedVersion: "1.0.0", Command: command, Env: []string{"PLUGINHOSTTEST_BEHAVIOUR=echo", "PLUGINHOSTTEST_DIR=" + dir, "GORACE=atexit_sleep_ms=0"}, Init: subprocess.InitParams{DataDir: dir}}}, nil //nolint:misspell // fixed fixture environment name
+		return Plan{Spec: Spec{ID: "fixture", ExpectedVersion: "1.0.0", Command: command, Env: []string{"PLUGINHOSTTEST_BEHAVIOUR=echo", "PLUGINHOSTTEST_DIR=" + dir, "GORACE=atexit_sleep_ms=0"}, Init: subprocess.InitParams{PluginDir: dir, DataDir: dir, CacheDir: dir, HostInfo: subprocess.HostInfo{Version: "1.0.0"}}}}, nil //nolint:misspell // fixed fixture environment name
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +115,8 @@ func TestDisableFenceAtPublicationAfterSuccessfulActivation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := Plan{Spec: Spec{ID: "fixture", ExpectedVersion: "1.0.0", Command: command, Env: []string{"PLUGINHOSTTEST_BEHAVIOUR=echo", "GORACE=atexit_sleep_ms=0"}, Init: subprocess.InitParams{DataDir: t.TempDir()}}} //nolint:misspell // fixed fixture environment name
+	dir := t.TempDir()
+	p := Plan{Spec: Spec{ID: "fixture", ExpectedVersion: "1.0.0", Command: command, Env: []string{"PLUGINHOSTTEST_BEHAVIOUR=echo", "GORACE=atexit_sleep_ms=0"}, Init: subprocess.InitParams{PluginDir: dir, DataDir: dir, CacheDir: dir, HostInfo: subprocess.HostInfo{Version: "1.0.0"}}}} //nolint:misspell // fixed fixture environment name
 	type activation struct {
 		ctx   context.Context
 		child *Process
@@ -130,7 +131,14 @@ func TestDisableFenceAtPublicationAfterSuccessfulActivation(t *testing.T) {
 	l.status.DesiredEnabled = true
 	result := make(chan *Failure, 1)
 	go func() { result <- l.load(context.Background(), 0, p) }()
-	active := <-entered
+	var active activation
+	select {
+	case active = <-entered:
+	case failure := <-result:
+		t.Fatalf("load failed before activation barrier: %v", failure)
+	case <-time.After(2 * time.Second):
+		t.Fatal("activation barrier never reached")
+	}
 	l.mu.Lock()
 	close(release)
 	// loadValue cancels this callback context after receiving the successful

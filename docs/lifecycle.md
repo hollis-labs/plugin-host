@@ -5,9 +5,12 @@ serialized enable/disable/reload, and generation-owned resources. It uses
 individual `Process` instances and owns its one retry loop. It never nests a
 `Supervisor`. Process-only hosts can keep using `Start` or `Supervise`.
 
-This implementation uses the pinned SDK and subprocess protocol 1. Explicit
-protocol-2 grants and reverse services require separate SDK adoption; this
-controller does not emit or negotiate either contract.
+This implementation consumes the SDK's protocol-2 `subprocess.InitParams` /
+`InitResult` and `capability.GrantSet` directly. Capability contract 1 and the
+issued incarnation are validated before any child starts. Protocol 1 has no
+fallback. Reverse services and hooks are unimplemented: the controller adds no
+profile offers, and a positive acknowledgement is refused before load. A valid
+host-supplied optional offer may be visibly declined (omitted acknowledgement).
 
 ## Host adapter
 
@@ -52,8 +55,13 @@ spawn a child. During load:
 1. Persist a fresh generation and form `Owner`'s canonical tuple.
 2. `PrepareScope(ctx, owner, plan)` creates an inactive scope and returns the
    generation-bound `Spec`. It can construct fresh host-owned Init/config/env
-   after generation issuance. It must preserve reviewed identity/version/artifact.
-3. Spawn, initialize, verify exact protocol and expected identity/version, then
+   after generation issuance. The plan passed to PrepareScope already carries
+   the canonical SDK `Incarnation`; the returned Spec must preserve it. Every
+   grant must use that same tuple, including fresh generation on retry/reload.
+   Opaque `Scope` JSON and verified `Identity` stay separate from authority.
+   It must preserve reviewed identity/version/artifact.
+3. Validate and encode the complete SDK Init before spawn, initialize, verify
+   actual protocol 2/capability contract 1 and expected identity/version, then
    load. `Spec.ExpectedID` and `ExpectedVersion` enforce wire checks before load;
    `Spec.ID` is the diagnostic label. Lifecycle defaults ExpectedID to its ID, rejects a different planned ID, and
    requires a strict expected plugin version during compatibility preflight.
@@ -199,9 +207,8 @@ adapting the SDK execution contract also checks exactly one engine matching
 the selected runtime and supplies a separate Node `Min: "22.0.0"` requirement
 independent of the declared range. A max-only declaration cannot bypass this
 baseline. Native binary versions describe the host's native-runner contract,
-not the plugin version or compiler. Manifest protocol 2 requires protocol-2
-SDK adoption; this step's protocol-1 controller does not claim manifest-v2
-execution support.
+not the plugin version or compiler. The controller verifies actual protocol 2; the host still validates its manifest
+and resolves actual engine/host versions before supplying a Plan.
 
 `pluginhosttest.Run` retains R01–R18 for process drivers. `RunLifecycle` adds a
 a separate harness with real children. Each requirement declares its library
@@ -225,8 +232,9 @@ library explicitly supplies `SyntheticHostAdapterCases` to certify its seam.
 R22/R23 use staged registration rollback and a captured callback dispatch gate.
 Each application must test its
 actual registrations, review, durable preference and credential implementation.
-This change includes no application adoption, reverse RPC, SDK protocol-2 DTO,
-release or tag.
+This change includes no application adoption, reverse RPC, hook dispatch, release
+or tag. Hosts requiring a service profile must refuse the visible decline before
+activation; neither profile is available from this driver.
 
 Cancelled callbacks have a 25ms grace to return before being tracked as still
 running. Late results never activate a generation. A failed reload preflight
@@ -242,3 +250,10 @@ acknowledgement with multiple unresolved reports, durable quarantine and active
 checkpoints across host epochs, acknowledgement Save failures/timeouts, and
 revision conflicts with concurrent disposal. Use the actual storage adapter;
 synthetic persistence cases cannot certify these durable guarantees.
+
+
+The base frame default is 8 MiB including LF both ways; host service offers
+may advertise at most that size. Lifecycle calls omit params or encode {}.
+Process conformance R12 checks a 7 MiB response, rejects a 9 MiB response
+and request, and verifies the connection remains usable. Tagged RPC identifiers
+and duplex transport belong to a later SDK adoption.
