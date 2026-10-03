@@ -28,8 +28,13 @@ refuses a tag whose CHANGELOG has no heading for it.
 - Unexpected exits are terminal unless explicitly classified transient;
   standalone Supervisor requires `ClassifyExit`. Failed restart handshakes
   only retry explicitly transient errors. Lifecycle owns its own single loop.
-- Cleanup waits are bounded even for callbacks that ignore cancellation;
-  remaining cleanup and child reaping continue while quarantine blocks reuse.
+- Load-side and cleanup waits are bounded even for callbacks that ignore cancellation;
+  late results are discarded, and cleanup/child reaping continue while quarantine
+  blocks reuse. Report IDs support reconciliation before generation issuance.
+- Disposal history retains all unresolved reports and a bounded completed tail;
+  owner-keyed persistence preserves quarantine across host epochs, including an
+  active checkpoint without completed teardown. Acknowledgement saves are bounded
+  and release the operation gate.
 - Disable fences survive queued Enable calls; replacement requires a fresh tuple.
 - Process and Supervisor errors retain bounded redacted cause text and wrapped
   causes; process-only diagnostics omit generation zero. Classifier panics are

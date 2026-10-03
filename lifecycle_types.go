@@ -131,6 +131,9 @@ func (f CleanupFailure) Unwrap() error { return f.Cause }
 // DisposalReport preserves cleanup errors separately from the load failure.
 // Incomplete means replacement is quarantined until host reconciliation.
 type DisposalReport struct {
+	// ID names the report independently of authority; generation zero reports
+	// describe a callback that timed out before generation issuance.
+	ID           string
 	Owner        Owner
 	Failures     []CleanupFailure
 	Incomplete   bool
@@ -149,14 +152,18 @@ func (r DisposalReport) Unwrap() []error {
 }
 
 var (
-	ErrIdentityMismatch  = errors.New("pluginhost: plugin identity differs from plan")
-	ErrVersionMismatch   = errors.New("pluginhost: plugin version differs from plan")
-	ErrQuarantined       = errors.New("pluginhost: incomplete disposal requires host reconciliation")
-	ErrDisabled          = errors.New("pluginhost: operation superseded by disable")
-	ErrInvalidGeneration = errors.New("pluginhost: generation must increase and fit a safe integer")
-	ErrUnknownDisposal   = errors.New("pluginhost: disposal identity is unknown")
-	ErrCleanupPending    = errors.New("pluginhost: isolated cleanup is still running")
-	ErrCallbackPanic     = errors.New("pluginhost: lifecycle callback panicked")
+	ErrIdentityMismatch        = errors.New("pluginhost: plugin identity differs from plan")
+	ErrVersionMismatch         = errors.New("pluginhost: plugin version differs from plan")
+	ErrQuarantined             = errors.New("pluginhost: incomplete disposal requires host reconciliation")
+	ErrDisabled                = errors.New("pluginhost: operation superseded by disable")
+	ErrUnreconciledIncarnation = errors.New("pluginhost: prior host incarnation lacks completed disposal")
+	ErrInvalidLifecycleRecord  = errors.New("pluginhost: invalid persisted lifecycle record")
+	ErrLifecycleStateChanged   = errors.New("pluginhost: lifecycle state changed during acknowledgement")
+	ErrStateStorePending       = errors.New("pluginhost: lifecycle state read is still running")
+	ErrInvalidGeneration       = errors.New("pluginhost: generation must increase and fit a safe integer")
+	ErrUnknownDisposal         = errors.New("pluginhost: disposal identity is unknown")
+	ErrCleanupPending          = errors.New("pluginhost: isolated cleanup is still running")
+	ErrCallbackPanic           = errors.New("pluginhost: lifecycle callback panicked")
 	// ErrDependency is returned by a host preflight when loaded dependents
 	// prevent disable/reload. Dependency ordering/cascade is host policy.
 	ErrDependency = errors.New("pluginhost: loaded dependents prevent operation")

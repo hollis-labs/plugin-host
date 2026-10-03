@@ -122,7 +122,7 @@ func TestDisableEpochCannotBeReopenedByQueuedEnable(t *testing.T) {
 	// A timed-out queued enable must also leave admission/intent closed.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if !errors.Is(l.Enable(ctx), context.DeadlineExceeded) {
+	if err := l.Enable(ctx); !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, pluginhost.ErrQuarantined) {
 		t.Fatal("queued enable ignored its context")
 	}
 	if l.IsCurrent(owner) || l.Current() != nil || l.Status().DesiredEnabled {
@@ -135,9 +135,15 @@ func TestDisableEpochCannotBeReopenedByQueuedEnable(t *testing.T) {
 	if err := awaitResult(t, disabled); err != nil {
 		t.Fatal(err)
 	}
-	if err := awaitResult(t, enabled); err != nil {
-		t.Fatal(err)
+	if err := awaitResult(t, enabled); !errors.Is(err, pluginhost.ErrQuarantined) {
+		t.Fatal("pending plan did not quarantine", err)
 	}
+	for _, report := range l.Status().Disposals {
+		if report.Incomplete {
+			eventually(t, time.Second, "late plan reconciliation", func() bool { return l.AcknowledgeReport(context.Background(), report.ID) == nil })
+		}
+	}
+	enableController(t, l)
 	if !l.Status().DesiredEnabled || l.Current() == nil || l.IsCurrent(owner) || l.Status().Owner.OwnerGeneration <= owner.OwnerGeneration {
 		t.Fatal("enable did not start a fresh generation after disable")
 	}
@@ -301,18 +307,18 @@ type refusingStateStore struct {
 	refuse atomic.Bool
 }
 
-func (s *refusingStateStore) Save(ctx context.Context, host, id string, r pluginhost.LifecycleRecord) error {
+func (s *refusingStateStore) Save(ctx context.Context, id string, r pluginhost.LifecycleRecord) error {
 	if s.refuse.Load() {
 		return errors.New("state persistence refused")
 	}
-	return s.MemoryLifecycleStateStore.Save(ctx, host, id, r)
+	return s.MemoryLifecycleStateStore.Save(ctx, id, r)
 }
 func TestPersistedQuarantineRequiresSuccessfulAcknowledgement(t *testing.T) {
 	o := lifecycleOptions(t)
 	owner := pluginhost.Owner{HostInstance: o.HostInstance, OwnerID: "fixture", OwnerGeneration: 100}
 	store := &refusingStateStore{}
-	record := pluginhost.LifecycleRecord{Revision: 1, LastGeneration: 100, Disposals: []pluginhost.DisposalReport{{Owner: owner, Incomplete: true}}}
-	if err := store.Save(context.Background(), o.HostInstance, "fixture", record); err != nil {
+	record := pluginhost.LifecycleRecord{HostInstance: o.HostInstance, Revision: 1, LastGeneration: 100, Disposals: []pluginhost.DisposalReport{{ID: "persisted-incomplete", Owner: owner, Incomplete: true}}}
+	if err := store.Save(context.Background(), "fixture", record); err != nil {
 		t.Fatal(err)
 	}
 	o.StateStore = store
@@ -332,7 +338,7 @@ func TestPersistedQuarantineRequiresSuccessfulAcknowledgement(t *testing.T) {
 	if err := l.AcknowledgeDisposal(context.Background(), owner); err != nil {
 		t.Fatal(err)
 	}
-	saved, err := store.Load(context.Background(), o.HostInstance, "fixture")
+	saved, err := store.Load(context.Background(), "fixture")
 	if err != nil || !saved.Disposals[0].Acknowledged || !saved.Disposals[0].Incomplete {
 		t.Fatal("acknowledgement lost historical report", saved, err)
 	}

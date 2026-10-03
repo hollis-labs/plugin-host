@@ -87,8 +87,9 @@ or activation completing late. Repeated disable returns the stored report,
 without repeating cleanup or starting another child. Accepted teardown completes
 with independent bounded cleanup contexts even if the caller context expires.
 BeforeDisable is an admission preflight that can overlap a pending load; make
-that callback concurrency-safe. All resource acquisition/publication/disposal
-callbacks and load operations serialize within the controller.
+that callback concurrency-safe. Controller operations serialize; an isolated timed-out callback may still run
+while teardown proceeds. Host callbacks must be tuple-bound and safe to overlap
+Revoke/Dispose with timed-out preparation/activation and each other.
 
 Reload preflights plan/resolve/compat while the old generation serves. A preflight
 failure preserves it. After successful preflight, revoke/dispose the old generation
@@ -96,7 +97,10 @@ before loading a fresh one: callable generations do not overlap. Post-teardown
 failure leaves unavailable; restoration is an explicit new operation.
 
 `Status` exposes intent, actual state, owner, last/origin failure, retry attempts,
-exhaustion, the latest disposal report and per-generation `Disposals` history.
+exhaustion, the latest disposal report and bounded `Disposals` history. Unresolved
+incomplete reports remain until acknowledgement; only the latest 32 completed
+or acknowledged reports are retained. Persisted input/output is capped at 128
+reports; oversized or invalid records fail closed with `ErrInvalidLifecycleRecord`.
 Successful activation clears originating failure; cleanup preserves each old
 report when a replacement also fails. `Current` only returns a running generation.
 Captured callbacks must check `IsCurrent(owner)` at actual dispatch and use the
@@ -104,7 +108,11 @@ host's own tuple-bound admission/draining gate. Checking only when capturing a
 callback is insufficient; no Go library can undo an already committed effect.
 Never route an old tuple to a replacement with the same plugin ID.
 
-Callbacks run without the state mutex, so they may read Status/IsCurrent. Do not
+Load-side callbacks run without the state mutex with bounded waits
+(`CallbackTimeout`, default 10s); accepted Disable cancels the wait immediately.
+Late Plan/Resolve/Prepare results are discarded. Timed-out callbacks are recorded
+as incomplete, and any spawned child is stopped before replacement.
+Callbacks may read Status/IsCurrent. Do not
 synchronously call Enable/Disable/Reload from resource callbacks: operations
 serialize and a recursive operation cannot complete until its caller returns.
 Unrelated controllers run independently. The host must enforce one active
@@ -130,19 +138,32 @@ a failed unload with successful reaping and host cleanup remains safely fenced.
 Repeated disable preserves the quarantine/report.
 
 Cleanup callbacks run in isolated goroutines with bounded waits (default 2s
-each). A callback ignoring context cannot delay child shutdown or remaining
+each). Revoke and Dispose must tolerate concurrent execution after a timeout.
+A callback ignoring context cannot delay child shutdown or remaining
 cleanup. It can continue running after timeout; the report stays incomplete
 and quarantine prevents replacement. `AcknowledgeDisposal(ctx, owner)` requires
 the exact report tuple and refuses while any timed-out callback is still running.
+Pre-generation callback failures have generation zero and an independent
+`DisposalReport.ID`; reconcile them with `AcknowledgeReport(ctx, id)` instead of
+an authority tuple. Report IDs are never authority tokens.
 After host reconciliation, acknowledgement clears that report's quarantine while
 retaining its historical failures; it does not enable the plugin.
 
 The library retains reports and quarantine across controller recreation within
 the host process. `LifecycleOptions.StateStore` optionally persists the
-`LifecycleRecord` high-water mark and disposal history. Implementations must
-atomically reject older revisions so a late save cannot undo newer state.
-Acknowledgement must persist successfully before clearing quarantine. Use
-`MemoryLifecycleStateStore` for process-local adapters; durable hosts supply
+`LifecycleRecord` high-water mark and disposal history, keyed by stable owner ID.
+Quarantine survives a new host epoch; the generation watermark is restored only
+for its recorded epoch. An active-incarnation checkpoint is saved before scope
+preparation, so a host restart without completed disposal also restores quarantine.
+Implementations must atomically reject older revisions so a late save cannot undo newer state.
+Acknowledgement must persist successfully before clearing quarantine. Its Save
+is bounded by CleanupTimeout and does not hold the operation gate. A reserved
+revision prevents a late save from overwriting newer disposal/reservation state;
+concurrent state changes return `ErrLifecycleStateChanged` for host retry. The
+host still permits only one active controller per owner; acknowledgement never
+authorizes concurrent controllers. Hung store callbacks remain tracked and
+prevent repeated reads/writes until they return.
+Use `MemoryLifecycleStateStore` for process-local adapters; durable hosts supply
 their own store. A new controller is never a cleanup repair.
 
 Retries are off by default. `RetryPolicy.MaxAttempts > 1` gives a finite budget,

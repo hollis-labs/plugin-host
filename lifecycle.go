@@ -19,12 +19,14 @@ type Plan struct {
 }
 
 // LifecycleCallbacks run without the controller's state mutex held. They
-// should cooperate with cancellation; cleanup waits are isolated and bounded.
+// should cooperate with cancellation; all load/cleanup waits are isolated and
+// bounded. Timed-out callbacks may overlap teardown for the same tuple.
 // Scope callbacks always receive
 // the canonical tuple, including partial preparation/failed activation.
 // Revoke closes admission/credentials and cancels or boundedly drains host
 // work before returning. Dispose removes remaining resources after process
-// shutdown, even after earlier cleanup errors. Both are idempotent.
+// shutdown, even after earlier cleanup errors. Both are idempotent and safe
+// to run concurrently with timed-out host callbacks.
 type LifecycleCallbacks struct {
 	Plan               func(context.Context) (Plan, error)
 	Resolve            func(context.Context, Plan) (Plan, error)
@@ -59,8 +61,11 @@ type LifecycleOptions struct {
 	Callbacks      LifecycleCallbacks
 	Retry          RetryPolicy
 	CleanupTimeout time.Duration
-	ClassifyExit   func(ExitInfo) error
-	StateStore     LifecycleStateStore
+	// CallbackTimeout bounds load-side host callbacks; default 10s. Disable
+	// cancellation interrupts the wait immediately even if host code ignores it.
+	CallbackTimeout time.Duration
+	ClassifyExit    func(ExitInfo) error
+	StateStore      LifecycleStateStore
 }
 
 // State separates desired intent from actual availability.
@@ -93,6 +98,8 @@ type incarnation struct {
 	process  *Process
 	cancel   context.CancelFunc
 	disposed bool
+	pending  []<-chan struct{}
+	failures []CleanupFailure
 }
 
 // Lifecycle manages one ID. Operations serialize, but Disable cancels and
@@ -118,13 +125,25 @@ func NewLifecycle(id string, o LifecycleOptions) (*Lifecycle, error) {
 	if o.CleanupTimeout <= 0 {
 		o.CleanupTimeout = 2 * time.Second
 	}
+	if o.CallbackTimeout <= 0 {
+		o.CallbackTimeout = defaultHandshakeTimeout
+	}
 	l := &Lifecycle{id: id, opts: o, gate: make(chan struct{}, 1), status: LifecycleStatus{State: StateDisabled}}
 	l.gate <- struct{}{}
 	if o.StateStore != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), o.CleanupTimeout)
 		defer cancel()
-		record, _, err := isolated(ctx, func() (LifecycleRecord, error) { return o.StateStore.Load(ctx, o.HostInstance, id) })
+		for _, report := range l.history().Disposals {
+			if len(report.Failures) > 0 && report.Failures[0].Step == "state_load" && l.pendingCallbacks(report.ID) {
+				return nil, ErrStateStorePending
+			}
+		}
+		record, done, err := isolated(ctx, func() (LifecycleRecord, error) { return o.StateStore.Load(ctx, id) })
 		if err != nil {
+			if done != nil {
+				l.notePending(Owner{HostInstance: o.HostInstance, OwnerID: id}, "state_load", done, err)
+				return nil, errors.Join(ErrStateStorePending, err)
+			}
 			return nil, err
 		}
 		if err = l.restore(record); err != nil {
@@ -222,16 +241,43 @@ func callback(ctx context.Context, fn func() error) (err error) {
 	}
 	return err
 }
+func loadValue[T any](ctx context.Context, l *Lifecycle, fn func(context.Context) (T, error)) (T, error) {
+	callCtx, cancel := context.WithTimeout(ctx, l.opts.CallbackTimeout)
+	defer cancel()
+	value, done, err := isolated(callCtx, func() (T, error) { return fn(callCtx) })
+	if done != nil {
+		err = &pendingCallbackError{Cause: err, Done: done}
+	}
+	return value, err
+}
+func (l *Lifecycle) preflightFailure(stage Stage, step string, err error) *Failure {
+	var pending *pendingCallbackError
+	if errors.As(err, &pending) {
+		l.notePending(Owner{HostInstance: l.opts.HostInstance, OwnerID: l.id}, step, pending.Done, err)
+		if old := l.detach(); old != nil {
+			l.dispose(old)
+		}
+		persistCtx, cancel := context.WithTimeout(context.Background(), l.opts.CleanupTimeout)
+		if e := l.persist(persistCtx); e != nil {
+			var p *pendingCallbackError
+			if errors.As(e, &p) {
+				l.notePending(Owner{HostInstance: l.opts.HostInstance, OwnerID: l.id}, "persist", p.Done, e)
+			}
+		}
+		cancel()
+	}
+	return l.failure(stage, step, 0, err)
+}
 func (l *Lifecycle) preflight(ctx context.Context) (Plan, *Failure) {
-	var p Plan
-	err := callback(ctx, func() (e error) { p, e = l.opts.Callbacks.Plan(ctx); return e })
+	p, err := loadValue(ctx, l, l.opts.Callbacks.Plan)
 	if err != nil {
-		return p, l.failure(StagePlan, "plan", 0, err)
+		return p, l.preflightFailure(StagePlan, "plan", err)
 	}
 	if l.opts.Callbacks.Resolve != nil {
-		err = callback(ctx, func() (e error) { p, e = l.opts.Callbacks.Resolve(ctx, p); return e })
+		input := snapshotPlan(p)
+		p, err = loadValue(ctx, l, func(c context.Context) (Plan, error) { return l.opts.Callbacks.Resolve(c, input) })
 		if err != nil {
-			return p, l.failure(StageResolve, "resolve", 0, err)
+			return p, l.preflightFailure(StageResolve, "resolve", err)
 		}
 	}
 	if p.Spec.ExpectedID == "" {
@@ -250,9 +296,11 @@ func (l *Lifecycle) preflight(ctx context.Context) (Plan, *Failure) {
 		}
 	}
 	if l.opts.Callbacks.CheckCompatibility != nil {
-		err = callback(ctx, func() error { return l.opts.Callbacks.CheckCompatibility(ctx, p) })
+		_, err = loadValue(ctx, l, func(c context.Context) (struct{}, error) {
+			return struct{}{}, l.opts.Callbacks.CheckCompatibility(c, p)
+		})
 		if err != nil {
-			return p, l.failure(StageCompat, "compatibility", 0, err)
+			return p, l.preflightFailure(StageCompat, "compatibility", err)
 		}
 	}
 	return snapshotPlan(p), nil
@@ -360,8 +408,8 @@ func (l *Lifecycle) Reload(ctx context.Context) error {
 	defer cancel()
 	defer l.end()
 	if l.opts.Callbacks.BeforeReload != nil {
-		if err = callback(op, func() error { return l.opts.Callbacks.BeforeReload(op) }); err != nil {
-			return l.failure(StagePlan, "reload", 0, err)
+		if _, err = loadValue(op, l, func(c context.Context) (struct{}, error) { return struct{}{}, l.opts.Callbacks.BeforeReload(c) }); err != nil {
+			return l.preflightFailure(StagePlan, "reload", err)
 		}
 	}
 	p, f := l.preflight(op)
@@ -473,18 +521,22 @@ func (l *Lifecycle) startAttempts(ctx context.Context, rev uint64, prepared *Pla
 	panic("unreachable")
 }
 func (l *Lifecycle) load(ctx context.Context, rev uint64, p Plan) *Failure {
-	var g uint64
-	err := callback(ctx, func() (e error) { g, e = l.opts.Generations.Next(ctx, l.opts.HostInstance, l.id); return e })
-	if err == nil {
-		err = l.reserve(g)
-	}
-	if err == nil {
-		persistCtx, cancel := context.WithTimeout(context.Background(), l.opts.CleanupTimeout)
-		err = l.persist(persistCtx)
-		cancel()
-	}
+	g, err := loadValue(ctx, l, func(c context.Context) (uint64, error) { return l.opts.Generations.Next(c, l.opts.HostInstance, l.id) })
 	if err != nil {
+		return l.preflightFailure(StageLoad, "generation", err)
+	}
+	if err = l.reserve(g); err != nil {
 		return l.failure(StageLoad, "generation", 0, err)
+	}
+	persistCtx, persistCancel := context.WithTimeout(ctx, l.opts.CleanupTimeout)
+	err = l.persist(persistCtx)
+	persistCancel()
+	if err != nil {
+		var pending *pendingCallbackError
+		if errors.As(err, &pending) {
+			l.notePending(Owner{HostInstance: l.opts.HostInstance, OwnerID: l.id, OwnerGeneration: g}, "persist", pending.Done, err)
+		}
+		return l.failure(StageLoad, "generation", g, err)
 	}
 	o := Owner{HostInstance: l.opts.HostInstance, OwnerID: l.id, OwnerGeneration: g}
 	// The generation lifetime is independent of the caller's start context.
@@ -499,22 +551,24 @@ func (l *Lifecycle) load(ctx context.Context, rev uint64, p Plan) *Failure {
 		if step == "spawn" || step == "handshake" {
 			f.Diagnostic = safeDiagnostic(p.Spec, e.Error())
 		}
+		var pending *pendingCallbackError
+		if errors.As(e, &pending) {
+			i.pending = append(i.pending, pending.Done)
+			i.failures = append(i.failures, CleanupFailure{Step: step, Cause: e})
+		}
 		l.dispose(i)
 		return f
 	}
 	if l.opts.Callbacks.PrepareScope != nil {
-		err = callback(ctx, func() error {
-			expectedID, expectedVersion := p.Spec.ExpectedID, p.Spec.ExpectedVersion
-			var spec Spec
-			var e error
-			spec, e = l.opts.Callbacks.PrepareScope(ctx, o, p)
-			if e == nil {
-				p.Spec = snapshotSpec(spec)
-				p.Spec.ExpectedID = expectedID
-				p.Spec.ExpectedVersion = expectedVersion
-			}
-			return e
-		})
+		expectedID, expectedVersion := p.Spec.ExpectedID, p.Spec.ExpectedVersion
+		input := snapshotPlan(p)
+		var spec Spec
+		spec, err = loadValue(ctx, l, func(c context.Context) (Spec, error) { return l.opts.Callbacks.PrepareScope(c, o, input) })
+		if err == nil {
+			p.Spec = snapshotSpec(spec)
+			p.Spec.ExpectedID = expectedID
+			p.Spec.ExpectedVersion = expectedVersion
+		}
 		if err != nil {
 			return fail("prepare", err)
 		}
@@ -522,6 +576,12 @@ func (l *Lifecycle) load(ctx context.Context, rev uint64, p Plan) *Failure {
 	p.Spec.ID = l.id
 	if p.Spec.ExpectedID == "" {
 		p.Spec.ExpectedID = l.id
+	}
+	if hook := p.Spec.BeforeSpawn; hook != nil {
+		p.Spec.BeforeSpawn = func(c context.Context) error {
+			_, e := loadValue(c, l, func(c context.Context) (struct{}, error) { return struct{}{}, hook(c) })
+			return e
+		}
 	}
 	i.process, err = Spawn(ctx, p.Spec)
 	if err != nil {
@@ -532,7 +592,9 @@ func (l *Lifecycle) load(ctx context.Context, rev uint64, p Plan) *Failure {
 		return fail("handshake", err)
 	}
 	if l.opts.Callbacks.Activate != nil {
-		err = callback(ctx, func() error { return l.opts.Callbacks.Activate(ctx, o, i.process) })
+		_, err = loadValue(ctx, l, func(c context.Context) (struct{}, error) {
+			return struct{}{}, l.opts.Callbacks.Activate(c, o, i.process)
+		})
 		if err != nil {
 			return fail("activate", err)
 		}
@@ -559,8 +621,8 @@ func (l *Lifecycle) dispose(i *incarnation) {
 	l.mu.Lock()
 	l.status.State = StateStarting
 	l.mu.Unlock() // fence before host callbacks
-	r := DisposalReport{Owner: i.owner}
-	var pending []<-chan struct{}
+	r := DisposalReport{Owner: i.owner, Failures: slices.Clone(i.failures), Incomplete: len(i.pending) > 0}
+	pending := slices.Clone(i.pending)
 	run := func(step string, fn func(context.Context) error) {
 		ctx, cancel := context.WithTimeout(context.Background(), l.opts.CleanupTimeout)
 		defer cancel()
@@ -590,12 +652,16 @@ func (l *Lifecycle) dispose(i *incarnation) {
 	if l.opts.Callbacks.Dispose != nil {
 		run("dispose", func(ctx context.Context) error { return l.opts.Callbacks.Dispose(ctx, i.owner) })
 	}
-	l.recordDisposal(r, pending)
+	r = l.recordDisposal(r, pending)
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), l.opts.CleanupTimeout)
 	if err := l.persist(persistCtx); err != nil {
 		r.Failures = append(r.Failures, CleanupFailure{Step: "persist", Cause: err})
 		r.Incomplete = true
-		l.recordDisposal(r, pending)
+		var p *pendingCallbackError
+		if errors.As(err, &p) {
+			pending = append(pending, p.Done)
+		}
+		r = l.recordDisposal(r, pending)
 	}
 	persistCancel()
 	l.mu.Lock()
@@ -625,10 +691,15 @@ func (l *Lifecycle) watch(ctx context.Context, i *incarnation) {
 	info, _ := i.process.ExitInfo()
 	var err = ErrGone
 	if l.opts.ClassifyExit != nil {
-		err = callback(context.Background(), func() error { return l.opts.ClassifyExit(info) })
+		_, err = loadValue(ctx, l, func(c context.Context) (struct{}, error) { return struct{}{}, l.opts.ClassifyExit(info) })
 		if err == nil {
 			err = ErrGone
 		}
+	}
+	var pending *pendingCallbackError
+	if errors.As(err, &pending) {
+		i.pending = append(i.pending, pending.Done)
+		i.failures = append(i.failures, CleanupFailure{Step: "exit", Cause: err})
 	}
 	f := l.failure(StageLoad, "exit", i.owner.OwnerGeneration, err)
 	l.dispose(i)

@@ -28,6 +28,7 @@ type LifecycleDriver interface {
 	Current() *pluginhost.Process
 	IsCurrent(pluginhost.Owner) bool
 	AcknowledgeDisposal(context.Context, pluginhost.Owner) error
+	AcknowledgeReport(context.Context, string) error
 }
 
 // LifecycleHarness adapts a host's controller to the normalized library seam.
@@ -58,9 +59,13 @@ func LifecycleWaive(id, reason string) LifecycleOption {
 	return func(c *lifecycleConfig) { c.waivers[id] = reason }
 }
 
+// LifecycleRunReport records executed and explicitly waived requirements.
+type LifecycleRunReport struct{ Executed, Waived []string }
+
 // RunLifecycle exercises R19-R27 with a declared owner for every requirement.
 // Host waivers are explicit, reasoned and printed as skipped subtests.
-func RunLifecycle(t *testing.T, h LifecycleHarness, opts ...LifecycleOption) {
+func RunLifecycle(t *testing.T, h LifecycleHarness, opts ...LifecycleOption) LifecycleRunReport {
+	var report LifecycleRunReport
 	tests := []struct {
 		id, name, owner string
 		run             func(*lifecycleEnv)
@@ -91,6 +96,11 @@ func RunLifecycle(t *testing.T, h LifecycleHarness, opts ...LifecycleOption) {
 		}
 	}
 	for _, tc := range tests {
+		if _, ok := cfg.waivers[tc.id]; ok {
+			report.Waived = append(report.Waived, tc.id)
+		} else {
+			report.Executed = append(report.Executed, tc.id)
+		}
 		t.Run(tc.id+"_"+tc.name, func(t *testing.T) {
 			t.Logf("OWNER %s: %s", tc.id, tc.owner)
 			if reason, ok := cfg.waivers[tc.id]; ok {
@@ -99,6 +109,7 @@ func RunLifecycle(t *testing.T, h LifecycleHarness, opts ...LifecycleOption) {
 			tc.run(&lifecycleEnv{t: t, h: h})
 		})
 	}
+	return report
 }
 
 type lifecycleEnv struct {
@@ -471,6 +482,7 @@ func (e *lifecycleEnv) reload() {
 	}
 }
 func (e *lifecycleEnv) cleanup() {
+	e.uncooperativeCallbacks()
 	// Cleanup callbacks may inspect the controller without its mutex held.
 	p := e.plan(BehaviourEcho)
 	o := e.options(p)
@@ -623,9 +635,15 @@ func (e *lifecycleEnv) crash() {
 		e.t.Fatal("enable succeeded after disable won late activation")
 	}
 	if err := <-stopped; err != nil {
-		e.t.Fatal(err)
+		var report pluginhost.DisposalReport
+		if !errors.As(err, &report) || !report.Incomplete {
+			e.t.Fatal(err)
+		}
 	}
 	e.gone(late)
+	if l.Status().State == pluginhost.StateQuarantined {
+		e.await("late activation reconciliation", func() bool { return l.AcknowledgeDisposal(context.Background(), l.Status().Owner) == nil })
+	}
 	if l.Current() != nil || l.Status().State != pluginhost.StateDisabled {
 		e.t.Fatal("late activation resurrected")
 	}

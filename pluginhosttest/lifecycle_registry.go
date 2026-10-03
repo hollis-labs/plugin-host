@@ -7,6 +7,7 @@ import (
 	pluginhost "github.com/hollis-labs/plugin-host"
 	"reflect"
 	"sync"
+	"testing"
 	"time"
 )
 
@@ -157,5 +158,68 @@ func (e *lifecycleEnv) unclassifiedExit() {
 	defer mu.Unlock()
 	if starts != 1 || l.Current() != nil || l.Status().RetryAttempts != 0 {
 		e.t.Fatal("unclassified exit restarted")
+	}
+}
+
+func (e *lifecycleEnv) uncooperativeCallbacks() {
+	for _, step := range []string{"revoke", "dispose", "activate"} {
+		e.t.Run("uncooperative_"+step, func(t *testing.T) {
+			child := &lifecycleEnv{t: t, h: e.h}
+			p := child.plan(BehaviourEcho)
+			o := child.options(p)
+			o.CallbackTimeout = 50 * time.Millisecond
+			release := make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			defer unblock()
+			entered := make(chan struct{})
+			var process *pluginhost.Process
+			switch step {
+			case "revoke":
+				o.Callbacks.Revoke = func(context.Context, pluginhost.Owner) error { close(entered); <-release; return nil }
+			case "dispose":
+				o.Callbacks.Dispose = func(context.Context, pluginhost.Owner) error { close(entered); <-release; return nil }
+			case "activate":
+				o.Callbacks.Activate = func(_ context.Context, _ pluginhost.Owner, p *pluginhost.Process) error {
+					process = p
+					close(entered)
+					<-release
+					return nil
+				}
+			}
+			l := child.new(o)
+			started := make(chan error, 1)
+			if step == "activate" {
+				go func() { started <- l.Enable(context.Background()) }()
+				<-entered
+			} else {
+				child.enable(l)
+				process = l.Current()
+			}
+			stopped := make(chan error, 1)
+			go func() { stopped <- l.Disable(context.Background()) }()
+			select {
+			case err := <-stopped:
+				var report pluginhost.DisposalReport
+				if !errors.As(err, &report) || !report.Incomplete {
+					t.Fatal("uncooperative callback did not report quarantine", err)
+				}
+			case <-time.After(time.Second):
+				unblock()
+				<-stopped
+				t.Fatal("uncooperative callback blocked disposal")
+			}
+			if step == "activate" {
+				if err := <-started; err == nil {
+					t.Fatal("late activation succeeded")
+				}
+			}
+			child.gone(process)
+			if !errors.Is(l.Enable(context.Background()), pluginhost.ErrQuarantined) {
+				t.Fatal("pending callback permitted replacement")
+			}
+			unblock()
+			child.await("callback reconciliation", func() bool { return l.AcknowledgeDisposal(context.Background(), l.Status().Owner) == nil })
+		})
 	}
 }
