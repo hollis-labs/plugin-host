@@ -7,6 +7,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Write the entry for a release here BEFORE cutting its tag: the release workflow
 refuses a tag whose CHANGELOG has no heading for it.
 
+## Unreleased
+
+### Added
+
+- Per-plugin `Lifecycle` with staged planning, compatibility checks, persisted
+  generation issuance, enable/disable/reload, scope callbacks, dispatch fencing,
+  finite classified retries and deterministic disposal reports/quarantine.
+- `Stage`, `Failure`, `TransientError`, `DisposalReport`, and pure inclusive
+  semantic-version bounds with explicit prerelease policy.
+- Expected wire identity/version verification between init and load.
+- Separate real-process lifecycle conformance harness, R19–R27, with declared
+  owners, named host waivers and host-provided review/persistence adapters. The
+  library run has no waivers.
+- Exact-tuple disposal acknowledgement, optional lifecycle state persistence,
+  per-generation cleanup history and safe-integer generation validation.
+
+### Changed
+
+- Cooperative cancellation receives a bounded grace before pending quarantine;
+  reload preflight timeouts preserve the serving generation and failure status.
+- BeforeDisable and Supervisor classification are bounded; snapshot revisions
+  fail closed at exhaustion. Exact report acknowledgement and revision conflicts
+  have dedicated regressions and documented host storage requirements.
+
+- Unexpected exits are terminal unless explicitly classified transient;
+  standalone Supervisor requires `ClassifyExit`. Failed restart handshakes
+  only retry explicitly transient errors. Lifecycle owns its own single loop.
+- Load-side and cleanup waits are bounded even for callbacks that ignore cancellation;
+  late results are discarded, and cleanup/child reaping continue while quarantine
+  blocks reuse. Report IDs support reconciliation before generation issuance.
+- Disposal history retains all unresolved reports and a bounded completed tail;
+  owner-keyed persistence preserves quarantine across host epochs, including an
+  active checkpoint without completed teardown. Acknowledgement saves are bounded
+  and release the operation gate.
+- Disable fences survive queued Enable calls; replacement requires a fresh tuple.
+- Process and Supervisor errors retain bounded redacted cause text and wrapped
+  causes; process-only diagnostics omit generation zero. Classifier panics are
+  contained, and exit classification identifies supervisor health kills.
+
 ## v0.1.2 — 2026-10-02
 
 ### Added

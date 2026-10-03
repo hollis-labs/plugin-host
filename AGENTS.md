@@ -1,6 +1,6 @@
 # plugin-host
 
-Host-side driver for plugin-sdk's stdio JSON-RPC protocol: spawn, handshake, id-correlated calls, supervised restart, bounded shutdown.
+Host-side driver for plugin-sdk's stdio JSON-RPC protocol: spawn, handshake, id-correlated calls, classified transient restart, bounded shutdown.
 
 It is not a plugin registry, a trust model or an installer. Anything that decides which plugins exist, what they may do or what secrets they hold belongs to the host that imports this; the library carries `Spec.Env`, `Spec.Init.Config` and `Spec.Init.Granted` through untouched.
 
@@ -9,10 +9,10 @@ It is not a plugin registry, a trust model or an installer. Anything that decide
 - `doc.go` — the package documentation and the list of contracts; read it before changing behavior.
 - `conn.go`, `client.go` — `Conn` (framing, ids, correlation, `ErrGone`, frame cap) and the typed `Client`.
 - `process.go`, `spec.go`, `pgroup_unix.go` — `Spawn`/`Start`/`Handshake`/`Stop`/`Kill`, the `Spec` defaults, and the process-group code (`pgroup_other.go` is the non-unix fallback).
-- `supervisor.go`, `restart.go`, `healthgate.go` — restart with backoff, the budget, health kill, and the on-demand cached verdict.
+- `supervisor.go`, `restart.go`, `healthgate.go` — classified transient restart with backoff, the budget, health kill, and the on-demand cached verdict.
 - `tail.go`, `exit.go` — stderr `Tail`/`Redact` and exit classification, both copied from go-mcp's `supervise` (attribution in the file comments). Do not import go-mcp: its module requires the MCP SDK.
 - `guard/` — `Guarded`, panic and budget containment for in-process plugin calls. It imports nothing.
-- `pluginhosttest/` — the conformance suite (`Run`, `Harness`, `Waive`, requirements R01-R18 in `suite.go`) and the re-exec fixture plugin (`fixture.go`). `MaybeRunFixture()` must be the first line of `TestMain` in every test binary that uses it.
+- `pluginhosttest/` — the conformance suite (`Run`, `Harness`, `Waive`, requirements R01-R18 in `suite.go`, plus `RunLifecycle`/`LifecycleHarness`/`LifecycleWaive` for R19-R27 in `lifecycle.go`) and the re-exec fixture plugin (`fixture.go`). `MaybeRunFixture()` must be the first line of `TestMain` in every test binary that uses it.
 - `.github/workflows/check.yml` — the full CI gate; `release.yml` refuses a tag with no CHANGELOG heading.
 
 ## Commands
@@ -41,8 +41,8 @@ Always `GOWORK=off`: a parent `go.work` would hide a missing or wrong dependency
 - Outbound frames are capped at 8 MiB and refused with `ErrFrameTooLarge` before any write, because plugin-sdk's `Serve` exits on a longer line. Ids start at 1: id 0 is a notification and gets no reply.
 - Stopping a plugin means closing its stdin. `plugin/unload` over RPC does not end `Serve`, and `Serve` calls the plugin's `Unload` again on exit, so a plugin's `Unload` runs twice on a clean stop. `Stop` is bounded by `UnloadTimeout + ReapTimeout` whatever the context says (`TestStopContextCancellationShortensButNeverLengthens`), and `UnloadTimeout` is one budget shared by the unload call and the wait for exit.
 - A failed `Start` leaves no child: it is killed and reaped, and the error carries the redacted stderr tail. Stderr is read into a bounded `Tail`, never passed through, and secrets are scrubbed from every text built from it.
-- A `Supervisor` never installs a child spawned while `Stop` was running (`TestStopDuringBackoffNeverResurrectsTheChild`, `TestStopDuringARestartHandshakeStopsTheNewChild`), and `Stop` must return even when it races `Start`'s first handshake: every path that will not run the loop calls `finish()` (`TestStopDuringTheFirstHandshakeReturnsAndLeavesNothingBehind`). Stop it through the `Supervisor`; a process stopped behind its back is restarted.
+- A `Supervisor` never installs a child spawned while `Stop` was running (`TestStopDuringBackoffNeverResurrectsTheChild`, `TestStopDuringARestartHandshakeStopsTheNewChild`), and `Stop` must return even when it races `Start`'s first handshake: every path that will not run the loop calls `finish()` (`TestStopDuringTheFirstHandshakeReturnsAndLeavesNothingBehind`). Stop it through the `Supervisor`; a process stopped behind its back is classified before any restart.
 - Race-instrumented binaries sleep one second at exit unless `GORACE=atexit_sleep_ms=0`; `FixtureCommand` sets it. Without it every "graceful" stop looks slow under `-race`.
 - A bare `select {}` in a fixture trips the runtime's deadlock detector and kills the process; use `sleepForever`. A wedge that dies on its own proves nothing.
-- The conformance suite is the binding deliverable. This repo's own run (`TestConformance`) uses zero waivers; `Waive` is for hosts, and a waiver names its reason. Do not add a waiver, or loosen a requirement, to make this repo's run pass.
+- The conformance suite is the binding deliverable. This repo's own runs (`TestConformance`, `TestLifecycleConformance`) use zero waivers; `Waive`/`LifecycleWaive` are for hosts, and a waiver names its reason. Do not add a waiver, or loosen a requirement, to make this repo's run pass.
 - `mcp/list_tools` has no typed method on purpose: the SDK declares it but `Serve` cannot answer it.

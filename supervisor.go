@@ -12,6 +12,11 @@ import (
 type SuperviseOptions struct {
 	// Policy is the restart budget and backoff.
 	Policy RestartPolicy
+	// ClassifyExit must return a typed TransientError to permit restarting.
+	// Nil means unexpected exits are terminal. Never infer transience from a timeout.
+	ClassifyExit func(ExitInfo) error
+	// ClassifyTimeout bounds exit classification (default 10s). Stop cancels it.
+	ClassifyTimeout time.Duration
 
 	// HealthInterval, when positive, probes plugin/health that often
 	// (Nanite and mcp-host style). Each probe is bounded by HealthTimeout
@@ -20,14 +25,14 @@ type SuperviseOptions struct {
 	HealthInterval time.Duration
 	HealthTimeout  time.Duration
 	// KillAfterUnhealthy kills the process after this many consecutive bad
-	// probes (an error or ok=false), which restarts it under Policy. Zero
+	// probes (an error or ok=false); ClassifyExit decides whether Policy restarts it. Zero
 	// never kills.
 	KillAfterUnhealthy int
 
 	// OnStart runs after every successful start, first one included, with
 	// the new process installed. OnExit runs when a process ended without a
 	// Stop, before the backoff wait; restarting is false when the budget is
-	// spent. OnGiveUp runs once, with the reason, when supervision ends
+	// spent or classification is terminal. OnGiveUp runs once, with the reason, when supervision ends
 	// because no further restart will be made. Callbacks run on the
 	// supervisor's goroutine: keep them short.
 	OnStart  func(*Process)
@@ -35,14 +40,14 @@ type SuperviseOptions struct {
 	OnGiveUp func(error)
 }
 
-// Supervisor keeps one plugin running: it restarts the process when it exits
-// unexpectedly, re-running the full handshake each time, with backoff and a
-// budget from [RestartPolicy], and optionally kills it when it stays
-// unhealthy.
+// Supervisor restarts explicitly transient exits through a full handshake
+// with backoff and a budget from [RestartPolicy]. Unknown exits are terminal.
+// It optionally kills a persistently unhealthy process and marks that exit
+// SupervisorInitiatedKill before asking ClassifyExit.
 //
 // Stop it through [Supervisor.Stop]. A process stopped behind its back (by
 // calling Stop or Kill on [Supervisor.Current]) is an unexpected exit as far
-// as the supervisor can tell, and is restarted.
+// as the supervisor can tell, and is classified before any restart.
 type Supervisor struct {
 	spec Spec
 	opts SuperviseOptions
@@ -50,11 +55,12 @@ type Supervisor struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu       sync.Mutex
-	cur      *Process
-	restarts int
-	started  bool
-	stopped  bool
+	mu           sync.Mutex
+	cur          *Process
+	restarts     int
+	started      bool
+	stopped      bool
+	healthKilled *Process
 
 	stopOnce   sync.Once
 	stopping   chan struct{}
@@ -189,6 +195,10 @@ func (s *Supervisor) run(p *Process) {
 			return
 		}
 		info, _ := p.ExitInfo()
+		s.mu.Lock()
+		info.SupervisorInitiatedKill = s.healthKilled == p
+		s.healthKilled = nil
+		s.mu.Unlock()
 
 		s.mu.Lock()
 		s.cur = nil
@@ -210,12 +220,23 @@ func (s *Supervisor) run(p *Process) {
 func (s *Supervisor) restart(crashed *Process, info ExitInfo) (*Process, bool) {
 	notified := false
 	var lastErr error
+	if s.opts.ClassifyExit != nil {
+		timeout := s.opts.ClassifyTimeout
+		if timeout <= 0 {
+			timeout = 10 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(s.ctx, timeout)
+		_, _, lastErr = isolated(ctx, func() (struct{}, error) { return struct{}{}, s.opts.ClassifyExit(info) })
+		cancel()
+	}
+	retryable := IsTransient(lastErr)
 	for {
 		s.mu.Lock()
 		attempt := s.restarts
 		s.mu.Unlock()
 
 		delay, allowed := s.opts.Policy.Backoff(attempt)
+		allowed = allowed && retryable
 		if !notified {
 			notified = true
 			if s.opts.OnExit != nil {
@@ -252,6 +273,7 @@ func (s *Supervisor) restart(crashed *Process, info ExitInfo) (*Process, bool) {
 		if err != nil {
 			s.mu.Unlock()
 			lastErr = err
+			retryable = IsTransient(err)
 			continue
 		}
 		s.cur = next
@@ -267,10 +289,10 @@ func (s *Supervisor) giveUp(crashed *Process, attempt int, lastErr error) {
 	if s.opts.OnGiveUp == nil {
 		return
 	}
-	err := fmt.Errorf("pluginhost: %s crashed and its restart budget is spent after %d restarts%s",
+	err := fmt.Errorf("pluginhost: %s stopped after %d restarts (terminal failure or exhausted budget)%s",
 		s.spec.label(), attempt, crashed.diagnosticsText())
 	if lastErr != nil {
-		err = fmt.Errorf("%w; last restart failed: %w", err, lastErr)
+		err = &Failure{PluginID: s.spec.ID, Stage: StageLoad, Step: "exit", Code: "supervision_ended", Cause: errors.Join(err, lastErr), Diagnostic: safeDiagnostic(s.spec, err.Error()+"; reason: "+lastErr.Error())}
 	}
 	s.opts.OnGiveUp(err)
 }
@@ -308,6 +330,9 @@ func (s *Supervisor) watch(p *Process) bool {
 			}
 			bad++
 			if s.opts.KillAfterUnhealthy > 0 && bad >= s.opts.KillAfterUnhealthy {
+				s.mu.Lock()
+				s.healthKilled = p
+				s.mu.Unlock()
 				_ = p.Kill()
 			}
 		}

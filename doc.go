@@ -14,6 +14,9 @@
 // [HealthGate] is an on-demand cached health verdict for hosts that would
 // rather not probe in the background. [Tail] and [Redact] bound and scrub a
 // plugin's stderr.
+// [Lifecycle] supplies ordered host planning, compatibility gates, generation
+// ownership, enable/disable/reload and context-aware scope disposal callbacks.
+// It owns one classified retry loop over processes, never a nested Supervisor.
 //
 // # What the host still decides
 //

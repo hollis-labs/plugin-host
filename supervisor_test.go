@@ -33,8 +33,9 @@ func newEvents() *events { return &events{giveUp: make(chan error, 4)} }
 
 func (e *events) options(policy pluginhost.RestartPolicy) pluginhost.SuperviseOptions {
 	return pluginhost.SuperviseOptions{
-		Policy:  policy,
-		OnStart: func(*pluginhost.Process) { e.starts.Add(1) },
+		Policy:       policy,
+		ClassifyExit: func(pluginhost.ExitInfo) error { return &pluginhost.TransientError{Code: "test_exit"} },
+		OnStart:      func(*pluginhost.Process) { e.starts.Add(1) },
 		OnExit: func(info pluginhost.ExitInfo, restarting bool) {
 			e.exits.Add(1)
 			e.exitInfo.Store(&info)

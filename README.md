@@ -57,7 +57,7 @@ func main() {
 }
 ```
 
-`Start` spawns the process, runs `plugin/init` then `plugin/load`, and returns a `*Process`. `Spawn` is the same without the handshake, for a host that builds its own `plugin/init` (for example with resolved secrets in `Config`). `Supervise` wraps a `Spec` and restarts the plugin through a full handshake with backoff. `guard.Guarded` runs an in-process plugin call under a panic and budget guard.
+`Start` spawns the process, runs `plugin/init` then `plugin/load`, and returns a `*Process`. `Spawn` is the same without the handshake, for a host that builds its own `plugin/init` (for example with resolved secrets in `Config`). `Supervise` wraps a `Spec` and restarts explicitly classified transient exits through a full handshake with backoff. `Lifecycle` adds staged planning, generation-owned enable/disable/reload and cleanup callbacks; see [the lifecycle contract](docs/lifecycle.md). `guard.Guarded` runs an in-process plugin call under a panic and budget guard.
 
 ## Compatibility
 
@@ -83,7 +83,7 @@ GOWORK=off go vet ./...
 GOWORK=off go test -race -count=1 ./...
 ```
 
-The tests start real child processes over the real wire: the test binary re-executes itself as the fixture plugin, so no `go build` is involved. Any host can check its own client against the same requirements (R01-R18) with `pluginhosttest.Run`; see the `pluginhosttest` package documentation.
+The tests start real child processes over the real wire: the test binary re-executes itself as the fixture plugin, so no `go build` is involved. Any host can check its own client against the same requirements (R01-R18) with `pluginhosttest.Run`, and its lifecycle adapter with `pluginhosttest.RunLifecycle` (R19-R27); see the `pluginhosttest` package documentation.
 
 CI (`.github/workflows/check.yml`) is the full gate.
 

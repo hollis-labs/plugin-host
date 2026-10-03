@@ -14,4 +14,9 @@
 // builds the command that selects a behavior. Compliant behavior runs the
 // real subprocess.Serve; hostile behavior (hang, crash, garbage, wedge,
 // stderr flood) uses a raw stdio loop.
+//
+// [RunLifecycle] is the separate generation/scope contract (R19–R27), using
+// real children, declared requirement owners, named [LifecycleWaive] exceptions
+// and host-supplied review/digest/persistence adapters. The library run explicitly
+// supplies synthetic adapters and uses zero waivers.
 package pluginhosttest
