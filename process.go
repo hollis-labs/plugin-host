@@ -132,7 +132,7 @@ func Spawn(ctx context.Context, s Spec) (*Process, error) {
 func Start(ctx context.Context, s Spec) (*Process, error) {
 	p, err := Spawn(ctx, s)
 	if err != nil {
-		return nil, processFailure(s.ID, "spawn", err)
+		return nil, processFailure(s, "spawn", err)
 	}
 	if _, _, err := p.Handshake(ctx); err != nil {
 		return nil, err
@@ -183,8 +183,8 @@ func (p *Process) Handshake(ctx context.Context) (subprocess.InitResult, subproc
 }
 
 // processFailure retains classification and cause without echoing raw config.
-func processFailure(id, step string, err error) *Failure {
-	return &Failure{PluginID: id, Stage: StageLoad, Step: step, Code: step + "_failed", Retryable: IsTransient(err), Cause: err}
+func processFailure(s Spec, step string, err error) *Failure {
+	return &Failure{PluginID: s.ID, Diagnostic: safeDiagnostic(s, err.Error()), Stage: StageLoad, Step: step, Code: step + "_failed", Retryable: IsTransient(err), Cause: err}
 }
 
 func (p *Process) handshake(ctx context.Context) (subprocess.InitResult, subprocess.LoadResult, error) {
@@ -202,25 +202,25 @@ func (p *Process) handshake(ctx context.Context) (subprocess.InitResult, subproc
 func (p *Process) initialize(ctx context.Context) (subprocess.InitResult, error) {
 	result, err := p.client.Init(ctx, p.spec.Init)
 	if err != nil {
-		return result, processFailure(p.spec.ID, "init", err)
+		return result, processFailure(p.spec, "init", err)
 	}
 	return result, nil
 }
 
 func (p *Process) verify(result subprocess.InitResult) error {
 	if result.Protocol != subprocess.ProtocolVersion {
-		return processFailure(p.spec.ID, "protocol", ErrProtocolMismatch)
+		return processFailure(p.spec, "protocol", fmt.Errorf("%w: plugin speaks %d, host speaks %d", ErrProtocolMismatch, result.Protocol, subprocess.ProtocolVersion))
 	}
 	if result.ID == "" {
-		return processFailure(p.spec.ID, "identity", ErrNoPluginID)
+		return processFailure(p.spec, "identity", ErrNoPluginID)
 	}
 	if p.spec.ExpectedID != "" && result.ID != p.spec.ExpectedID {
-		return processFailure(p.spec.ID, "identity", ErrIdentityMismatch)
+		return processFailure(p.spec, "identity", ErrIdentityMismatch)
 	}
 	if p.spec.ExpectedVersion != "" {
 		_, err := CompareVersions(result.Version, p.spec.ExpectedVersion)
 		if err != nil || result.Version != p.spec.ExpectedVersion {
-			return processFailure(p.spec.ID, "version", errors.Join(ErrVersionMismatch, err))
+			return processFailure(p.spec, "version", errors.Join(ErrVersionMismatch, err))
 		}
 	}
 	p.mu.Lock()
@@ -232,7 +232,7 @@ func (p *Process) verify(result subprocess.InitResult) error {
 func (p *Process) load(ctx context.Context) (subprocess.LoadResult, error) {
 	loaded, err := p.client.Load(ctx)
 	if err != nil {
-		return loaded, processFailure(p.spec.ID, "load", err)
+		return loaded, processFailure(p.spec, "load", err)
 	}
 	p.mu.Lock()
 	p.loaded = loaded

@@ -17,13 +17,23 @@ refuses a tag whose CHANGELOG has no heading for it.
 - `Stage`, `Failure`, `TransientError`, `DisposalReport`, and pure inclusive
   semantic-version bounds with explicit prerelease policy.
 - Expected wire identity/version verification between init and load.
-- Separate real-process lifecycle conformance harness, R19–R27, without waivers.
+- Separate real-process lifecycle conformance harness, R19–R27, with declared
+  owners, named host waivers and host-provided review/persistence adapters. The
+  library run has no waivers.
+- Exact-tuple disposal acknowledgement, optional lifecycle state persistence,
+  per-generation cleanup history and safe-integer generation validation.
 
 ### Changed
 
 - Unexpected exits are terminal unless explicitly classified transient;
   standalone Supervisor requires `ClassifyExit`. Failed restart handshakes
   only retry explicitly transient errors. Lifecycle owns its own single loop.
+- Cleanup waits are bounded even for callbacks that ignore cancellation;
+  remaining cleanup and child reaping continue while quarantine blocks reuse.
+- Disable fences survive queued Enable calls; replacement requires a fresh tuple.
+- Process and Supervisor errors retain bounded redacted cause text and wrapped
+  causes; process-only diagnostics omit generation zero. Classifier panics are
+  contained, and exit classification identifies supervisor health kills.
 
 ## v0.1.2 — 2026-10-02
 

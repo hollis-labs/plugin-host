@@ -16,6 +16,9 @@ string and one `GenerationStore` across controllers. `Next` must atomically
 persist a strictly increasing generation for `(host_instance, owner_id)`;
 controller recreation must not reset it. The zero-value `MemoryGenerationStore`
 is suitable within one process; a process restart requires a new epoch.
+Values must be positive and at most `MaxOwnerGeneration` (2^53 - 1). The
+library retains a per-owner high-water mark across controller recreation and
+rejects constant, decreasing or overflowing store results.
 Persistence failures stop before scope preparation or spawn. A consumed number
 is never reused, including after a failed load.
 
@@ -60,8 +63,10 @@ spawn a child. During load:
    activation is disposed, never installed as the callable generation.
 
 `Failure` identifies plugin, generation, stage, step and safe code, with `Unwrap`
-for `errors.Is`/`errors.As`. Its message does not print the underlying callback
-error/config. Handshake failures retain the bounded redacted stderr tail. Hosts
+for `errors.Is`/`errors.As`. Process/start/handshake and Supervisor messages include bounded redacted cause
+text; process-only errors omit a generation label. Other lifecycle callback
+messages expose safe labels, with causes available through Unwrap. Handshake
+failures retain the bounded redacted stderr tail. Hosts
 must keep identifier/code labels safe and redact underlying causes before display.
 Cleanup reports never replace the original load failure.
 
@@ -75,7 +80,9 @@ operators. Plan can enforce durable enable preference; `BeforeDisable` and
 and desired intent untouched. No automatic dependency inference/cascade occurs.
 
 Disable fences the controller immediately after its host preflight, cancels
-pending start/backoff, then serializes teardown. Disable wins over a handshake
+pending start/backoff, then serializes teardown. Its monotonic fence survives
+a later Enable; that Enable waits for accepted teardown and starts a new tuple.
+A canceled queued Enable leaves desired intent unchanged. Disable wins over a handshake
 or activation completing late. Repeated disable returns the stored report,
 without repeating cleanup or starting another child. Accepted teardown completes
 with independent bounded cleanup contexts even if the caller context expires.
@@ -89,7 +96,9 @@ before loading a fresh one: callable generations do not overlap. Post-teardown
 failure leaves unavailable; restoration is an explicit new operation.
 
 `Status` exposes intent, actual state, owner, last/origin failure, retry attempts,
-exhaustion and disposal report. `Current` only returns a running generation.
+exhaustion, the latest disposal report and per-generation `Disposals` history.
+Successful activation clears originating failure; cleanup preserves each old
+report when a replacement also fails. `Current` only returns a running generation.
 Captured callbacks must check `IsCurrent(owner)` at actual dispatch and use the
 host's own tuple-bound admission/draining gate. Checking only when capturing a
 callback is insufficient; no Go library can undo an already committed effect.
@@ -120,12 +129,21 @@ cleanup or unreaped children mark the report incomplete and quarantine replaceme
 a failed unload with successful reaping and host cleanup remains safely fenced.
 Repeated disable preserves the quarantine/report.
 
-Callbacks must cooperate with their cleanup context (default 2s per callback).
-Arbitrary in-process code cannot be forcibly stopped: a callback ignoring context
-can delay return. Once it returns, an expired context produces an incomplete
-report. A host requiring stronger isolation must supply it. Keep quarantine
-state across controller recreation until host reconciliation proves all old
-resources safe; creating another controller is not a cleanup repair.
+Cleanup callbacks run in isolated goroutines with bounded waits (default 2s
+each). A callback ignoring context cannot delay child shutdown or remaining
+cleanup. It can continue running after timeout; the report stays incomplete
+and quarantine prevents replacement. `AcknowledgeDisposal(ctx, owner)` requires
+the exact report tuple and refuses while any timed-out callback is still running.
+After host reconciliation, acknowledgement clears that report's quarantine while
+retaining its historical failures; it does not enable the plugin.
+
+The library retains reports and quarantine across controller recreation within
+the host process. `LifecycleOptions.StateStore` optionally persists the
+`LifecycleRecord` high-water mark and disposal history. Implementations must
+atomically reject older revisions so a late save cannot undo newer state.
+Acknowledgement must persist successfully before clearing quarantine. Use
+`MemoryLifecycleStateStore` for process-local adapters; durable hosts supply
+their own store. A new controller is never a cleanup repair.
 
 Retries are off by default. `RetryPolicy.MaxAttempts > 1` gives a finite budget,
 including initial attempt and crash replacements; explicit enable/reload resets
@@ -140,7 +158,10 @@ Standalone `Supervisor` now also requires a typed-transient `ClassifyExit` resul
 for crash restart. A failed replacement handshake is retried only if its own
 cause is explicitly transient. Its `RestartPolicy` still supplies budget/backoff,
 but a policy alone no longer opts unknown failures into restarting. Never wrap
-Lifecycle in Supervisor or add a second host retry loop.
+Lifecycle in Supervisor or add a second host retry loop. Classifier panics
+become `ErrCallbackPanic`; `ExitInfo.SupervisorInitiatedKill` distinguishes health
+monitor kills from spontaneous exits. Terminal diagnostics preserve the
+classification reason.
 
 ## Version gates and conformance
 
@@ -162,7 +183,9 @@ SDK adoption; this step's protocol-1 controller does not claim manifest-v2
 execution support.
 
 `pluginhosttest.Run` retains R01–R18 for process drivers. `RunLifecycle` adds a
-separate zero-waiver harness with real children:
+a separate harness with real children. Each requirement declares its library
+or host owner; `LifecycleWaive(id, reason)` prints and skips a named host waiver.
+The library runs all requirements with zero waivers:
 
 | Requirement | Coverage |
 | --- | --- |
@@ -174,9 +197,12 @@ separate zero-waiver harness with real children:
 | R24 | Preflight retains old, fresh reload token, post-teardown failure unavailable |
 | R25 | Unload error/wedge, revoke panic/error/timeout, remaining cleanup, quarantine |
 | R26 | Crash disposal/replacement, finite crash budget, late activation fence |
-| R27 | Synthetic review/digest/persistence refusals, changed bytes, controller recreation |
+| R27 | Host-provided review/digest/persistence refusal adapters, changed bytes, controller recreation |
 
-The synthetic adapter certifies the library seam. Each application must test its
+Hosts supply R27 cases through `LifecycleHarness.HostAdapterCases`; the
+library explicitly supplies `SyntheticHostAdapterCases` to certify its seam.
+R22/R23 use staged registration rollback and a captured callback dispatch gate.
+Each application must test its
 actual registrations, review, durable preference and credential implementation.
 This change includes no application adoption, reverse RPC, SDK protocol-2 DTO,
 release or tag.

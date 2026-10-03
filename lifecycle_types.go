@@ -19,8 +19,8 @@ const (
 	StageLoad    Stage = "load"
 )
 
-// Failure preserves the original cause without exposing its potentially
-// sensitive text in operator diagnostics. Inspect Cause with errors.Is/As.
+// Failure preserves the original cause for errors.Is/As. Diagnostic, when set,
+// must contain only redacted operator-safe text; Error bounds its length.
 type Failure struct {
 	PluginID   string
 	Generation uint64
@@ -29,10 +29,19 @@ type Failure struct {
 	Code       string
 	Retryable  bool
 	Cause      error
+	Diagnostic string
 }
 
 func (f *Failure) Error() string {
-	return fmt.Sprintf("pluginhost: %s generation %d: %s/%s (%s)", boundedLabel(f.PluginID), f.Generation, boundedLabel(string(f.Stage)), boundedLabel(f.Step), boundedLabel(f.Code))
+	label := boundedLabel(f.PluginID)
+	if f.Generation != 0 {
+		label += fmt.Sprintf(" generation %d", f.Generation)
+	}
+	text := fmt.Sprintf("pluginhost: %s: %s/%s (%s)", label, boundedLabel(string(f.Stage)), boundedLabel(f.Step), boundedLabel(f.Code))
+	if f.Diagnostic != "" {
+		text += ": " + boundedDiagnostic(f.Diagnostic)
+	}
+	return text
 }
 func (f *Failure) Unwrap() error { return f.Cause }
 
@@ -101,7 +110,7 @@ func (s *MemoryGenerationStore) Next(ctx context.Context, host, id string) (uint
 		s.values = make(map[[2]string]uint64)
 	}
 	key := [2]string{host, id}
-	if s.values[key] == ^uint64(0) {
+	if s.values[key] >= MaxOwnerGeneration {
 		return 0, errors.New("pluginhost: generation exhausted")
 	}
 	s.values[key]++
@@ -122,9 +131,10 @@ func (f CleanupFailure) Unwrap() error { return f.Cause }
 // DisposalReport preserves cleanup errors separately from the load failure.
 // Incomplete means replacement is quarantined until host reconciliation.
 type DisposalReport struct {
-	Owner      Owner
-	Failures   []CleanupFailure
-	Incomplete bool
+	Owner        Owner
+	Failures     []CleanupFailure
+	Incomplete   bool
+	Acknowledged bool
 }
 
 func (r DisposalReport) Error() string {
@@ -139,11 +149,14 @@ func (r DisposalReport) Unwrap() []error {
 }
 
 var (
-	ErrIdentityMismatch = errors.New("pluginhost: plugin identity differs from plan")
-	ErrVersionMismatch  = errors.New("pluginhost: plugin version differs from plan")
-	ErrQuarantined      = errors.New("pluginhost: incomplete disposal requires host reconciliation")
-	ErrDisabled         = errors.New("pluginhost: operation superseded by disable")
-	ErrCallbackPanic    = errors.New("pluginhost: lifecycle callback panicked")
+	ErrIdentityMismatch  = errors.New("pluginhost: plugin identity differs from plan")
+	ErrVersionMismatch   = errors.New("pluginhost: plugin version differs from plan")
+	ErrQuarantined       = errors.New("pluginhost: incomplete disposal requires host reconciliation")
+	ErrDisabled          = errors.New("pluginhost: operation superseded by disable")
+	ErrInvalidGeneration = errors.New("pluginhost: generation must increase and fit a safe integer")
+	ErrUnknownDisposal   = errors.New("pluginhost: disposal identity is unknown")
+	ErrCleanupPending    = errors.New("pluginhost: isolated cleanup is still running")
+	ErrCallbackPanic     = errors.New("pluginhost: lifecycle callback panicked")
 	// ErrDependency is returned by a host preflight when loaded dependents
 	// prevent disable/reload. Dependency ordering/cascade is host policy.
 	ErrDependency = errors.New("pluginhost: loaded dependents prevent operation")
@@ -155,4 +168,18 @@ func boundedLabel(s string) string {
 		return s[:96] + "..."
 	}
 	return s
+}
+
+func boundedDiagnostic(s string) string {
+	if len(s) > 2048 {
+		return s[:2048] + "..."
+	}
+	return s
+}
+func safeDiagnostic(s Spec, text string) string {
+	text = Redact(text, s.Secrets)
+	if s.Redact != nil {
+		text = s.Redact(text)
+	}
+	return boundedDiagnostic(text)
 }

@@ -1,6 +1,6 @@
 # plugin-host
 
-Host-side driver for plugin-sdk's stdio JSON-RPC protocol: spawn, handshake, id-correlated calls, supervised restart, bounded shutdown.
+Host-side driver for plugin-sdk's stdio JSON-RPC protocol: spawn, handshake, id-correlated calls, classified transient restart, bounded shutdown.
 
 It is not a plugin registry, a trust model or an installer. Anything that decides which plugins exist, what they may do or what secrets they hold belongs to the host that imports this; the library carries `Spec.Env`, `Spec.Init.Config` and `Spec.Init.Granted` through untouched.
 
@@ -9,7 +9,7 @@ It is not a plugin registry, a trust model or an installer. Anything that decide
 - `doc.go` — the package documentation and the list of contracts; read it before changing behavior.
 - `conn.go`, `client.go` — `Conn` (framing, ids, correlation, `ErrGone`, frame cap) and the typed `Client`.
 - `process.go`, `spec.go`, `pgroup_unix.go` — `Spawn`/`Start`/`Handshake`/`Stop`/`Kill`, the `Spec` defaults, and the process-group code (`pgroup_other.go` is the non-unix fallback).
-- `supervisor.go`, `restart.go`, `healthgate.go` — restart with backoff, the budget, health kill, and the on-demand cached verdict.
+- `supervisor.go`, `restart.go`, `healthgate.go` — classified transient restart with backoff, the budget, health kill, and the on-demand cached verdict.
 - `tail.go`, `exit.go` — stderr `Tail`/`Redact` and exit classification, both copied from go-mcp's `supervise` (attribution in the file comments). Do not import go-mcp: its module requires the MCP SDK.
 - `guard/` — `Guarded`, panic and budget containment for in-process plugin calls. It imports nothing.
 - `pluginhosttest/` — the conformance suite (`Run`, `Harness`, `Waive`, requirements R01-R18 in `suite.go`) and the re-exec fixture plugin (`fixture.go`). `MaybeRunFixture()` must be the first line of `TestMain` in every test binary that uses it.

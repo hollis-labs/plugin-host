@@ -16,5 +16,7 @@
 // stderr flood) uses a raw stdio loop.
 //
 // [RunLifecycle] is the separate generation/scope contract (R19–R27), using
-// real children and synthetic host policy/resource adapters without waivers.
+// real children, declared requirement owners, named [LifecycleWaive] exceptions
+// and host-supplied review/digest/persistence adapters. The library run explicitly
+// supplies synthetic adapters and uses zero waivers.
 package pluginhosttest

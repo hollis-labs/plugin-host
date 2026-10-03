@@ -7,6 +7,9 @@ import (
 
 // ExitInfo describes how a plugin process ended.
 type ExitInfo struct {
+	// SupervisorInitiatedKill distinguishes a health-policy kill from an
+	// external signal. ClassifyExit still decides whether it is transient.
+	SupervisorInitiatedKill bool
 	// Code is the exit status, or -1 when the process was killed by a signal.
 	Code int
 	// Signal names the terminating signal (for example "killed"); empty when

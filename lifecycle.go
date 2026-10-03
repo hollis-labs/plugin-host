@@ -19,7 +19,8 @@ type Plan struct {
 }
 
 // LifecycleCallbacks run without the controller's state mutex held. They
-// must cooperate with context cancellation. Scope callbacks always receive
+// should cooperate with cancellation; cleanup waits are isolated and bounded.
+// Scope callbacks always receive
 // the canonical tuple, including partial preparation/failed activation.
 // Revoke closes admission/credentials and cancels or boundedly drains host
 // work before returning. Dispose removes remaining resources after process
@@ -49,7 +50,8 @@ type RetryPolicy struct {
 }
 
 // LifecycleOptions must share HostInstance and Generations across controllers
-// in one host. CleanupTimeout bounds each cooperating callback (default 2s).
+// in one host. CleanupTimeout bounds each cleanup wait (default 2s). Timed-out callbacks
+// remain isolated and block acknowledgement until they return.
 // ClassifyExit is the only way to opt into retrying unexpected runtime exits.
 type LifecycleOptions struct {
 	HostInstance   string
@@ -58,6 +60,7 @@ type LifecycleOptions struct {
 	Retry          RetryPolicy
 	CleanupTimeout time.Duration
 	ClassifyExit   func(ExitInfo) error
+	StateStore     LifecycleStateStore
 }
 
 // State separates desired intent from actual availability.
@@ -81,10 +84,12 @@ type LifecycleStatus struct {
 	OriginFailure  *Failure
 	Exhausted      bool
 	Disposal       DisposalReport
+	Disposals      []DisposalReport
 }
 
 type incarnation struct {
 	owner    Owner
+	epoch    uint64
 	process  *Process
 	cancel   context.CancelFunc
 	disposed bool
@@ -94,15 +99,16 @@ type incarnation struct {
 // fences an in-flight load before waiting its turn. No Supervisor is nested:
 // this controller owns the single retry loop and crash recovery.
 type Lifecycle struct {
-	id       string
-	opts     LifecycleOptions
-	gate     chan struct{}
-	mu       sync.Mutex
-	status   LifecycleStatus
-	revision uint64
-	tries    int
-	pending  context.CancelFunc
-	current  *incarnation
+	id             string
+	opts           LifecycleOptions
+	gate           chan struct{}
+	mu             sync.Mutex
+	status         LifecycleStatus
+	revision       uint64
+	tries          int
+	pending        context.CancelFunc
+	current        *incarnation
+	disableBarrier <-chan struct{}
 }
 
 func NewLifecycle(id string, o LifecycleOptions) (*Lifecycle, error) {
@@ -114,6 +120,24 @@ func NewLifecycle(id string, o LifecycleOptions) (*Lifecycle, error) {
 	}
 	l := &Lifecycle{id: id, opts: o, gate: make(chan struct{}, 1), status: LifecycleStatus{State: StateDisabled}}
 	l.gate <- struct{}{}
+	if o.StateStore != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), o.CleanupTimeout)
+		defer cancel()
+		record, _, err := isolated(ctx, func() (LifecycleRecord, error) { return o.StateStore.Load(ctx, o.HostInstance, id) })
+		if err != nil {
+			return nil, err
+		}
+		if err = l.restore(record); err != nil {
+			return nil, err
+		}
+	}
+	history := l.history()
+	if len(history.Disposals) > 0 {
+		l.status.Disposal = history.Disposals[len(history.Disposals)-1]
+	}
+	if l.quarantined() {
+		l.status.State = StateQuarantined
+	}
 	return l, nil
 }
 func (l *Lifecycle) acquire(ctx context.Context) error {
@@ -129,6 +153,7 @@ func (l *Lifecycle) Status() LifecycleStatus {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	s := l.status
+	s.Disposals = l.history().Disposals
 	s.Disposal.Failures = slices.Clone(s.Disposal.Failures)
 	if s.LastFailure != nil {
 		f := *s.LastFailure
@@ -146,7 +171,7 @@ func (l *Lifecycle) Status() LifecycleStatus {
 func (l *Lifecycle) Current() *Process {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if !l.status.DesiredEnabled || l.status.State != StateRunning || l.current == nil {
+	if !l.status.DesiredEnabled || l.status.State != StateRunning || l.current == nil || l.current.epoch != l.revision {
 		return nil
 	}
 	select {
@@ -159,7 +184,7 @@ func (l *Lifecycle) Current() *Process {
 func (l *Lifecycle) IsCurrent(o Owner) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if !l.status.DesiredEnabled || l.status.State != StateRunning || l.current == nil || l.current.owner != o {
+	if !l.status.DesiredEnabled || l.status.State != StateRunning || l.current == nil || l.current.owner != o || l.current.epoch != l.revision {
 		return false
 	}
 	select {
@@ -232,14 +257,20 @@ func (l *Lifecycle) preflight(ctx context.Context) (Plan, *Failure) {
 	}
 	return snapshotPlan(p), nil
 }
-func (l *Lifecycle) begin(ctx context.Context, rev uint64) (context.Context, context.CancelFunc, error) {
+func (l *Lifecycle) begin(ctx context.Context, rev uint64, enabling bool) (context.Context, context.CancelFunc, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.revision != rev || !l.status.DesiredEnabled {
+	if l.revision != rev || (!enabling && !l.status.DesiredEnabled) {
 		return nil, nil, ErrDisabled
 	}
-	if l.status.Disposal.Incomplete {
+	if l.quarantined() {
 		return nil, nil, ErrQuarantined
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if enabling {
+		l.status.DesiredEnabled = true
 	}
 	op, cancel := context.WithCancel(ctx)
 	l.pending = cancel
@@ -254,7 +285,7 @@ func (l *Lifecycle) setFailure(f *Failure) {
 		l.status.OriginFailure = f
 	}
 	l.status.Exhausted = f.Retryable && l.tries >= max(l.opts.Retry.MaxAttempts, 1)
-	if l.status.Disposal.Incomplete {
+	if l.quarantined() {
 		l.status.State = StateQuarantined
 	} else if !l.status.DesiredEnabled {
 		l.status.State = StateDisabled
@@ -262,21 +293,34 @@ func (l *Lifecycle) setFailure(f *Failure) {
 		l.status.State = StateFailed
 	}
 }
-func (l *Lifecycle) intent() uint64 {
+func (l *Lifecycle) intent() (uint64, <-chan struct{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.status.DesiredEnabled = true
-	return l.revision
+	return l.revision, l.disableBarrier
+}
+func waitBarrier(ctx context.Context, barrier <-chan struct{}) error {
+	if barrier == nil {
+		return ctx.Err()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-barrier:
+		return ctx.Err()
+	}
 }
 
 // Enable is idempotent while running. Reload explicitly requests a new plan.
 func (l *Lifecycle) Enable(ctx context.Context) error {
-	rev := l.intent()
+	rev, barrier := l.intent()
+	if err := waitBarrier(ctx, barrier); err != nil {
+		return err
+	}
 	if err := l.acquire(ctx); err != nil {
 		return err
 	}
 	defer l.release()
-	op, cancel, err := l.begin(ctx, rev)
+	op, cancel, err := l.begin(ctx, rev, true)
 	if err != nil {
 		return err
 	}
@@ -288,7 +332,7 @@ func (l *Lifecycle) Enable(ctx context.Context) error {
 	if old := l.detach(); old != nil {
 		l.dispose(old)
 	}
-	if l.Status().Disposal.Incomplete {
+	if l.quarantined() {
 		return ErrQuarantined
 	}
 	l.resetAttempts()
@@ -309,7 +353,7 @@ func (l *Lifecycle) Reload(ctx context.Context) error {
 		return err
 	}
 	defer l.release()
-	op, cancel, err := l.begin(ctx, rev)
+	op, cancel, err := l.begin(ctx, rev, false)
 	if err != nil {
 		return err
 	}
@@ -330,7 +374,7 @@ func (l *Lifecycle) Reload(ctx context.Context) error {
 	if old := l.detach(); old != nil {
 		l.dispose(old)
 	}
-	if l.Status().Disposal.Incomplete {
+	if l.quarantined() {
 		return ErrQuarantined
 	}
 	l.resetAttempts()
@@ -349,10 +393,15 @@ func (l *Lifecycle) Disable(ctx context.Context) error {
 	l.mu.Lock()
 	l.status.DesiredEnabled = false
 	l.revision++
+	previous := l.disableBarrier
+	completed := make(chan struct{})
+	l.disableBarrier = completed
 	if l.pending != nil {
 		l.pending()
 	}
 	l.mu.Unlock()
+	defer close(completed)
+	_ = waitBarrier(context.Background(), previous)
 	// Teardown must run even after caller cancellation; callbacks have their
 	// own bounded cleanup contexts. Waiting cannot forcibly stop bad host code.
 	if err := l.acquire(context.WithoutCancel(ctx)); err != nil {
@@ -363,7 +412,7 @@ func (l *Lifecycle) Disable(ctx context.Context) error {
 		l.dispose(old)
 	}
 	l.mu.Lock()
-	if l.status.Disposal.Incomplete {
+	if l.quarantined() {
 		l.status.State = StateQuarantined
 	} else {
 		l.status.State = StateDisabled
@@ -404,7 +453,7 @@ func (l *Lifecycle) startAttempts(ctx context.Context, rev uint64, prepared *Pla
 			return nil
 		}
 		l.setFailure(f)
-		if !f.Retryable || l.Status().Disposal.Incomplete || attempt == limit {
+		if !f.Retryable || l.quarantined() || attempt == limit {
 			return f
 		}
 		delay := l.opts.Retry.Backoff
@@ -426,21 +475,33 @@ func (l *Lifecycle) startAttempts(ctx context.Context, rev uint64, prepared *Pla
 func (l *Lifecycle) load(ctx context.Context, rev uint64, p Plan) *Failure {
 	var g uint64
 	err := callback(ctx, func() (e error) { g, e = l.opts.Generations.Next(ctx, l.opts.HostInstance, l.id); return e })
-	if err != nil || g == 0 {
-		if err == nil {
-			err = errors.New("pluginhost: generation store returned zero")
-		}
+	if err == nil {
+		err = l.reserve(g)
+	}
+	if err == nil {
+		persistCtx, cancel := context.WithTimeout(context.Background(), l.opts.CleanupTimeout)
+		err = l.persist(persistCtx)
+		cancel()
+	}
+	if err != nil {
 		return l.failure(StageLoad, "generation", 0, err)
 	}
 	o := Owner{HostInstance: l.opts.HostInstance, OwnerID: l.id, OwnerGeneration: g}
 	// The generation lifetime is independent of the caller's start context.
 	life, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel retained in incarnation, called by dispose
-	i := &incarnation{owner: o, cancel: cancel}
+	i := &incarnation{owner: o, epoch: rev, cancel: cancel}
 	l.mu.Lock()
 	l.status.Owner = o
 	l.status.State = StateStarting
 	l.mu.Unlock()
-	fail := func(step string, e error) *Failure { f := l.failure(StageLoad, step, g, e); l.dispose(i); return f }
+	fail := func(step string, e error) *Failure {
+		f := l.failure(StageLoad, step, g, e)
+		if step == "spawn" || step == "handshake" {
+			f.Diagnostic = safeDiagnostic(p.Spec, e.Error())
+		}
+		l.dispose(i)
+		return f
+	}
 	if l.opts.Callbacks.PrepareScope != nil {
 		err = callback(ctx, func() error {
 			expectedID, expectedVersion := p.Spec.ExpectedID, p.Spec.ExpectedVersion
@@ -484,6 +545,8 @@ func (l *Lifecycle) load(ctx context.Context, rev uint64, p Plan) *Failure {
 	l.current = i
 	l.status.State = StateRunning
 	l.status.LastFailure = nil
+	l.status.OriginFailure = nil
+	l.status.Exhausted = false
 	l.mu.Unlock()
 	go l.watch(life, i) //nolint:gosec // G118: generation survives the startup request; dispose cancels its owned context
 	return nil
@@ -497,10 +560,15 @@ func (l *Lifecycle) dispose(i *incarnation) {
 	l.status.State = StateStarting
 	l.mu.Unlock() // fence before host callbacks
 	r := DisposalReport{Owner: i.owner}
+	var pending []<-chan struct{}
 	run := func(step string, fn func(context.Context) error) {
 		ctx, cancel := context.WithTimeout(context.Background(), l.opts.CleanupTimeout)
 		defer cancel()
-		if err := callback(ctx, func() error { return fn(ctx) }); err != nil {
+		_, done, err := isolated(ctx, func() (struct{}, error) { return struct{}{}, fn(ctx) })
+		if done != nil {
+			pending = append(pending, done)
+		}
+		if err != nil {
 			r.Failures = append(r.Failures, CleanupFailure{Step: step, Cause: err})
 			r.Incomplete = true
 		}
@@ -522,6 +590,14 @@ func (l *Lifecycle) dispose(i *incarnation) {
 	if l.opts.Callbacks.Dispose != nil {
 		run("dispose", func(ctx context.Context) error { return l.opts.Callbacks.Dispose(ctx, i.owner) })
 	}
+	l.recordDisposal(r, pending)
+	persistCtx, persistCancel := context.WithTimeout(context.Background(), l.opts.CleanupTimeout)
+	if err := l.persist(persistCtx); err != nil {
+		r.Failures = append(r.Failures, CleanupFailure{Step: "persist", Cause: err})
+		r.Incomplete = true
+		l.recordDisposal(r, pending)
+	}
+	persistCancel()
 	l.mu.Lock()
 	l.status.Disposal = r
 	if r.Incomplete {
@@ -540,7 +616,7 @@ func (l *Lifecycle) watch(ctx context.Context, i *incarnation) {
 	}
 	defer l.release()
 	l.mu.Lock()
-	active := l.current == i && l.status.DesiredEnabled
+	active := l.current == i && l.status.DesiredEnabled && i.epoch == l.revision
 	rev := l.revision
 	l.mu.Unlock()
 	if !active {
@@ -560,10 +636,10 @@ func (l *Lifecycle) watch(ctx context.Context, i *incarnation) {
 	l.current = nil
 	l.mu.Unlock()
 	l.setFailure(f)
-	if !f.Retryable || l.Status().Disposal.Incomplete || l.tries >= max(l.opts.Retry.MaxAttempts, 1) {
+	if !f.Retryable || l.quarantined() || l.tries >= max(l.opts.Retry.MaxAttempts, 1) {
 		return
 	}
-	op, cancel, e := l.begin(context.Background(), rev)
+	op, cancel, e := l.begin(context.Background(), rev, false)
 	if e != nil {
 		return
 	}

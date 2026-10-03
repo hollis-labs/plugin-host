@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -26,33 +27,77 @@ type LifecycleDriver interface {
 	Status() pluginhost.LifecycleStatus
 	Current() *pluginhost.Process
 	IsCurrent(pluginhost.Owner) bool
+	AcknowledgeDisposal(context.Context, pluginhost.Owner) error
 }
 
 // LifecycleHarness adapts a host's controller to the normalized library seam.
 // Hosts must additionally exercise their actual review, digest and registries.
 type LifecycleHarness interface {
 	NewLifecycle(string, pluginhost.LifecycleOptions) (LifecycleDriver, error)
+	HostAdapterCases(*testing.T, pluginhost.Plan, pluginhost.LifecycleOptions) []LifecycleAdapterCase
 }
 
-// RunLifecycle exercises R19-R27 separately, using real re-executed children.
-// There are no lifecycle waivers: every listed behavior is library-owned.
-func RunLifecycle(t *testing.T, h LifecycleHarness) {
+// LifecycleAdapterCase supplies a host's real review/digest/persistence refusal
+// path. The library's own run explicitly supplies SyntheticHostAdapterCases.
+type LifecycleAdapterCase struct {
+	Name    string
+	Plan    pluginhost.Plan
+	Options pluginhost.LifecycleOptions
+	Refusal error
+	Verify  func(*testing.T, LifecycleDriver, error)
+}
+
+type lifecycleConfig struct{ waivers map[string]string }
+
+// LifecycleOption configures a host's lifecycle conformance run.
+type LifecycleOption func(*lifecycleConfig)
+
+// LifecycleWaive prints a named host exception. A blank reason is invalid.
+// The library's own run supplies zero waivers.
+func LifecycleWaive(id, reason string) LifecycleOption {
+	return func(c *lifecycleConfig) { c.waivers[id] = reason }
+}
+
+// RunLifecycle exercises R19-R27 with a declared owner for every requirement.
+// Host waivers are explicit, reasoned and printed as skipped subtests.
+func RunLifecycle(t *testing.T, h LifecycleHarness, opts ...LifecycleOption) {
 	tests := []struct {
-		id  string
-		run func(*lifecycleEnv)
+		id, name, owner string
+		run             func(*lifecycleEnv)
 	}{
-		{"R19_stages_and_typed_failures", (*lifecycleEnv).stages},
-		{"R20_version_gates", (*lifecycleEnv).versions},
-		{"R21_classified_finite_retry", (*lifecycleEnv).retries},
-		{"R22_partial_scope_cleanup", (*lifecycleEnv).partial},
-		{"R23_disable_fences_dispatch", (*lifecycleEnv).disable},
-		{"R24_reload_generations", (*lifecycleEnv).reload},
-		{"R25_cleanup_continues_and_quarantines", (*lifecycleEnv).cleanup},
-		{"R26_crash_and_late_start", (*lifecycleEnv).crash},
-		{"R27_host_adapters", (*lifecycleEnv).adapters},
+		{"R19", "stages_and_typed_failures", "lifecycle controller", (*lifecycleEnv).stages},
+		{"R20", "version_gates", "normalized compatibility helpers", (*lifecycleEnv).versions},
+		{"R21", "classified_finite_retry", "lifecycle retry owner", (*lifecycleEnv).retries},
+		{"R22", "partial_scope_cleanup", "controller and host scope adapter", (*lifecycleEnv).partial},
+		{"R23", "disable_fences_dispatch", "controller and host dispatch adapter", (*lifecycleEnv).disable},
+		{"R24", "reload_generations", "lifecycle controller", (*lifecycleEnv).reload},
+		{"R25", "cleanup_continues_and_quarantines", "controller and host cleanup adapter", (*lifecycleEnv).cleanup},
+		{"R26", "crash_and_late_start", "lifecycle exit watcher", (*lifecycleEnv).crash},
+		{"R27", "host_adapters", "host review/digest/persistence adapters", (*lifecycleEnv).adapters},
+	}
+	cfg := lifecycleConfig{waivers: make(map[string]string)}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	for id, reason := range cfg.waivers {
+		known := false
+		for _, tc := range tests {
+			if tc.id == id {
+				known = true
+			}
+		}
+		if !known || strings.TrimSpace(reason) == "" {
+			t.Fatalf("invalid lifecycle waiver %q: require known ID and nonblank reason", id)
+		}
 	}
 	for _, tc := range tests {
-		t.Run(tc.id, func(t *testing.T) { tc.run(&lifecycleEnv{t: t, h: h}) })
+		t.Run(tc.id+"_"+tc.name, func(t *testing.T) {
+			t.Logf("OWNER %s: %s", tc.id, tc.owner)
+			if reason, ok := cfg.waivers[tc.id]; ok {
+				t.Skipf("WAIVED %s (owner %s): %s", tc.id, tc.owner, reason)
+			}
+			tc.run(&lifecycleEnv{t: t, h: h})
+		})
 	}
 }
 
@@ -124,6 +169,7 @@ func (e *lifecycleEnv) await(what string, fn func() bool) {
 	}
 }
 func (e *lifecycleEnv) stages() {
+	e.activationOrder()
 	for _, stage := range []pluginhost.Stage{pluginhost.StagePlan, pluginhost.StageResolve, pluginhost.StageCompat} {
 		e.t.Run(string(stage), func(t *testing.T) {
 			child := &lifecycleEnv{t: t, h: e.h}
@@ -185,6 +231,11 @@ func (e *lifecycleEnv) stages() {
 	}
 }
 func (e *lifecycleEnv) versions() {
+	err := pluginhost.CheckVersion(pluginhost.VersionRequirement{Name: "host", Version: "0.5.0", Bounds: pluginhost.VersionBounds{Min: "2.0.0", Max: "1.0.0"}})
+	if err == nil || !strings.Contains(err.Error(), "minimum exceeds maximum") {
+		e.t.Fatalf("malformed declaration not distinguished from ordinary bound refusal: %v", err)
+	}
+
 	// Hosts supply platform baselines independently of declared bounds.
 	for _, actual := range []string{"21.9.0", "22.0.0"} {
 		p := e.plan(BehaviourEcho)
@@ -209,7 +260,8 @@ func (e *lifecycleEnv) versions() {
 		{"0.2.0", "0.2.0", "0.2.0", false, true}, {"0.10.0", "0.2.0", "0.11.0", false, true},
 		{"1.0.0-rc.2", "1.0.0-rc.1", "1.0.0", true, true}, {"1.0.0-rc.2", "1.0.0-rc.10", "1.0.0", true, false},
 		{"1.0.0-rc.1", "0.1.0", "2.0.0", false, false}, {"dev", "0.1.0", "", false, false},
-		{"1.0.0", "", "", false, false}, {"1.0.0", "2.0.0", "0.1.0", false, false}, {"1.0.0", "bad", "", false, false},
+		{"01.0.0", "0.0.0", "", false, false}, {"1.01.0", "0.0.0", "", false, false}, {"1.0.01", "0.0.0", "", false, false},
+		{"1.0.0", "", "", false, false}, {"0.5.0", "2.0.0", "1.0.0", false, false}, {"1.0.0", "bad", "", false, false},
 	}
 	for _, tc := range tests {
 		p := e.plan(BehaviourEcho)
@@ -228,6 +280,7 @@ func (e *lifecycleEnv) versions() {
 	}
 }
 func (e *lifecycleEnv) retries() {
+	e.retryGeneration()
 	for _, transient := range []bool{false, true} {
 		p := e.plan(BehaviourEcho)
 		o := e.options(p)
@@ -283,24 +336,24 @@ func (e *lifecycleEnv) partial() {
 	for _, behavior := range []string{BehaviourInitError, BehaviourLoadError, BehaviourEcho} {
 		p := e.plan(behavior)
 		o := e.options(p)
-		order := []string{}
+		registry := &scopeRegistry{}
 		var child *pluginhost.Process
-		o.Callbacks.PrepareScope = func(_ context.Context, _ pluginhost.Owner, plan pluginhost.Plan) (pluginhost.Spec, error) {
-			order = append(order, "prepare")
+		o.Callbacks.PrepareScope = func(_ context.Context, owner pluginhost.Owner, plan pluginhost.Plan) (pluginhost.Spec, error) {
+			registry.prepare(owner)
 			return plan.Spec, nil
 		}
 		o.Callbacks.Activate = func(_ context.Context, _ pluginhost.Owner, p *pluginhost.Process) error {
 			child = p
 			return errors.New("activate refusal")
 		}
-		o.Callbacks.Revoke = func(context.Context, pluginhost.Owner) error { order = append(order, "revoke"); return nil }
-		o.Callbacks.Dispose = func(context.Context, pluginhost.Owner) error { order = append(order, "dispose"); return nil }
+		o.Callbacks.Revoke = func(_ context.Context, owner pluginhost.Owner) error { registry.revoke(owner); return nil }
+		o.Callbacks.Dispose = func(_ context.Context, owner pluginhost.Owner) error { registry.dispose(owner); return nil }
 		l := e.new(o)
 		if err := l.Enable(context.Background()); err == nil {
 			e.t.Fatal("expected failure")
 		}
-		if !reflect.DeepEqual(order, []string{"prepare", "revoke", "dispose"}) {
-			e.t.Fatal(order)
+		if !registry.empty() {
+			e.t.Fatal("partial-load registrations survived disposal")
 		}
 		if child != nil {
 			e.gone(child)
@@ -323,13 +376,27 @@ func (e *lifecycleEnv) partial() {
 func (e *lifecycleEnv) disable() {
 	p := e.plan(BehaviourEcho)
 	o := e.options(p)
+	registry := &scopeRegistry{}
+	registry.callbacks(&o)
 	var revoked, disposed atomic.Int32
-	o.Callbacks.Revoke = func(context.Context, pluginhost.Owner) error { revoked.Add(1); return nil }
-	o.Callbacks.Dispose = func(context.Context, pluginhost.Owner) error { disposed.Add(1); return nil }
+	o.Callbacks.Revoke = func(_ context.Context, owner pluginhost.Owner) error {
+		registry.revoke(owner)
+		revoked.Add(1)
+		return nil
+	}
+	o.Callbacks.Dispose = func(_ context.Context, owner pluginhost.Owner) error {
+		registry.dispose(owner)
+		disposed.Add(1)
+		return nil
+	}
 	l := e.new(o)
 	e.enable(l)
 	old := l.Current()
 	owner := l.Status().Owner
+	captured := e.capturedCallback(l, registry, owner)
+	if err := captured(); err != nil {
+		e.t.Fatal("active callback refused", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	done := make(chan error, 1)
@@ -341,6 +408,9 @@ func (e *lifecycleEnv) disable() {
 		e.t.Fatal(err)
 	}
 	e.gone(old)
+	if err := captured(); !errors.Is(err, pluginhost.ErrDisabled) {
+		e.t.Fatal("captured callback admitted after revoke")
+	}
 	if l.IsCurrent(owner) || l.Current() != nil || l.Status().DesiredEnabled {
 		e.t.Fatal("stale dispatch admitted")
 	}
@@ -357,6 +427,8 @@ func (e *lifecycleEnv) disable() {
 func (e *lifecycleEnv) reload() {
 	p := e.plan(BehaviourEcho)
 	o := e.options(p)
+	registry := &scopeRegistry{}
+	registry.callbacks(&o)
 	var refuse atomic.Bool
 	var loadFail atomic.Bool
 	o.Callbacks.Plan = func(context.Context) (pluginhost.Plan, error) {
@@ -399,6 +471,24 @@ func (e *lifecycleEnv) reload() {
 	}
 }
 func (e *lifecycleEnv) cleanup() {
+	// Cleanup callbacks may inspect the controller without its mutex held.
+	p := e.plan(BehaviourEcho)
+	o := e.options(p)
+	var inspected LifecycleDriver
+	o.Callbacks.Revoke = func(context.Context, pluginhost.Owner) error {
+		_ = inspected.Status()
+		return nil
+	}
+	o.Callbacks.Dispose = func(context.Context, pluginhost.Owner) error {
+		_ = inspected.Current()
+		return nil
+	}
+	inspected = e.new(o)
+	e.enable(inspected)
+	if err := inspected.Disable(context.Background()); err != nil {
+		e.t.Fatalf("cleanup status inspection blocked: %v", err)
+	}
+
 	unsafePlan := e.plan(BehaviourEcho)
 	unsafeOptions := e.options(unsafePlan)
 	unsafeOptions.Callbacks.Dispose = func(context.Context, pluginhost.Owner) error { return errors.New("unsafe resources") }
@@ -433,8 +523,10 @@ func (e *lifecycleEnv) cleanup() {
 		p := e.plan(BehaviourEcho)
 		o := e.options(p)
 		log := []string{}
+		var logMu sync.Mutex
+		addLog := func(step string) { logMu.Lock(); log = append(log, step); logMu.Unlock() }
 		o.Callbacks.Revoke = func(ctx context.Context, _ pluginhost.Owner) error {
-			log = append(log, "revoke")
+			addLog("revoke")
 			switch mode {
 			case "panic":
 				panic("synthetic")
@@ -446,7 +538,7 @@ func (e *lifecycleEnv) cleanup() {
 			}
 		}
 		o.Callbacks.Dispose = func(context.Context, pluginhost.Owner) error {
-			log = append(log, "dispose")
+			addLog("dispose")
 			return errors.New("dispose error")
 		}
 		l := e.new(o)
@@ -458,8 +550,11 @@ func (e *lifecycleEnv) cleanup() {
 			e.t.Fatalf("report=%v", err)
 		}
 		e.gone(old)
-		if !reflect.DeepEqual(log, []string{"revoke", "dispose"}) {
-			e.t.Fatal(log)
+		logMu.Lock()
+		snapshot := append([]string(nil), log...)
+		logMu.Unlock()
+		if !reflect.DeepEqual(snapshot, []string{"revoke", "dispose"}) {
+			e.t.Fatal(snapshot)
 		}
 		if !errors.Is(l.Enable(context.Background()), pluginhost.ErrQuarantined) {
 			e.t.Fatal("unsafe replacement allowed")
@@ -467,6 +562,7 @@ func (e *lifecycleEnv) cleanup() {
 	}
 }
 func (e *lifecycleEnv) crash() {
+	e.unclassifiedExit()
 	// An explicit enable racing the exit watcher must dispose the old scope
 	// before installing another process, even when recovery is disabled.
 	racePlan := e.plan(BehaviourEcho)
@@ -523,8 +619,12 @@ func (e *lifecycleEnv) crash() {
 	go func() { stopped <- l.Disable(context.Background()) }()
 	e.await("disable fence", func() bool { return !l.Status().DesiredEnabled })
 	close(release)
-	<-started
-	<-stopped
+	if err := <-started; err == nil {
+		e.t.Fatal("enable succeeded after disable won late activation")
+	}
+	if err := <-stopped; err != nil {
+		e.t.Fatal(err)
+	}
 	e.gone(late)
 	if l.Current() != nil || l.Status().State != pluginhost.StateDisabled {
 		e.t.Fatal("late activation resurrected")
@@ -535,56 +635,25 @@ type refusingStore struct{ err error }
 
 func (s refusingStore) Next(context.Context, string, string) (uint64, error) { return 0, s.err }
 func (e *lifecycleEnv) adapters() {
-	// A synthetic host pins reviewed bytes and rechecks at the execution
-	// boundary. Mutating them after resolution must never launch a child.
-	p0 := e.plan(BehaviourEcho)
-	o0 := e.options(p0)
-	artifact := filepath.Join(e.t.TempDir(), "artifact")
-	if err := os.WriteFile(artifact, []byte("reviewed"), 0o600); err != nil {
-		e.t.Fatal(err)
-	}
-	digest := sha256.Sum256([]byte("reviewed"))
-	refusal := errors.New("digest changed")
-	p0.Spec.BeforeSpawn = func(context.Context) error {
-		b, err := os.ReadFile(artifact) //nolint:gosec // synthetic reviewed artifact under the test temp directory
-		if err != nil {
-			return err
-		}
-		if sha256.Sum256(b) != digest {
-			return refusal
-		}
-		return nil
-	}
-	o0.Callbacks.Plan = func(context.Context) (pluginhost.Plan, error) { return p0, nil }
-	o0.Callbacks.PrepareScope = func(_ context.Context, _ pluginhost.Owner, plan pluginhost.Plan) (pluginhost.Spec, error) {
-		return plan.Spec, os.WriteFile(artifact, []byte("changed"), 0o600)
-	}
-	l0 := e.new(o0)
-	if err := l0.Enable(context.Background()); !errors.Is(err, refusal) {
-		e.t.Fatal(err)
-	}
-	e.noChild(p0)
-
-	for _, stage := range []string{"review", "digest", "persist"} {
-		p := e.plan(BehaviourEcho)
-		o := e.options(p)
-		cause := errors.New("host refusal")
-		switch stage {
-		case "review":
-			o.Callbacks.Plan = func(context.Context) (pluginhost.Plan, error) { return p, cause }
-		case "digest":
-			p.Spec.BeforeSpawn = func(context.Context) error { return cause }
-			o.Callbacks.Plan = func(context.Context) (pluginhost.Plan, error) { return p, nil }
-		case "persist":
-			o.Generations = refusingStore{cause}
-		}
-		l := e.new(o)
-		if err := l.Enable(context.Background()); !errors.Is(err, cause) {
-			e.t.Fatalf("adapter failure lost: %v", err)
-		}
-		e.noChild(p)
-	}
 	p := e.plan(BehaviourEcho)
+	cases := e.h.HostAdapterCases(e.t, p, e.options(p))
+	if len(cases) == 0 {
+		e.t.Fatal("host supplied no review/digest/persistence adapter cases")
+	}
+	for _, tc := range cases {
+		e.t.Run(tc.Name, func(t *testing.T) {
+			child := &lifecycleEnv{t: t, h: e.h}
+			l := child.new(tc.Options)
+			err := l.Enable(context.Background())
+			if tc.Refusal == nil || !errors.Is(err, tc.Refusal) {
+				t.Fatalf("host adapter refusal lost: %v", err)
+			}
+			child.noChild(tc.Plan)
+			if tc.Verify != nil {
+				tc.Verify(t, l, err)
+			}
+		})
+	}
 	o := e.options(p)
 	first := e.new(o)
 	e.enable(first)
@@ -595,4 +664,52 @@ func (e *lifecycleEnv) adapters() {
 	if second.Status().Owner.OwnerGeneration <= generation {
 		e.t.Fatal("controller recreation reset generation")
 	}
+}
+
+// SyntheticHostAdapterCases is the library's explicit example adapter. Hosts
+// supply their own cases through LifecycleHarness.HostAdapterCases; using this
+// helper does not certify their installation/review/persistence implementation.
+func SyntheticHostAdapterCases(t *testing.T, p pluginhost.Plan, o pluginhost.LifecycleOptions) []LifecycleAdapterCase {
+	t.Helper()
+	var cases []LifecycleAdapterCase
+	for _, stage := range []string{"review", "digest", "persistence"} {
+		options := o
+		options.Callbacks = o.Callbacks
+		plan := p
+		refusal := errors.New("synthetic host refusal")
+		switch stage {
+		case "review":
+			options.Callbacks.Plan = func(context.Context) (pluginhost.Plan, error) { return plan, refusal }
+		case "digest":
+			plan.Spec.BeforeSpawn = func(context.Context) error { return refusal }
+			options.Callbacks.Plan = func(context.Context) (pluginhost.Plan, error) { return plan, nil }
+		case "persistence":
+			options.Generations = refusingStore{refusal}
+		}
+		cases = append(cases, LifecycleAdapterCase{Name: stage, Plan: plan, Options: options, Refusal: refusal})
+	}
+	artifact := filepath.Join(t.TempDir(), "artifact")
+	if err := os.WriteFile(artifact, []byte("reviewed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte("reviewed"))
+	refusal := errors.New("digest changed")
+	plan := p
+	plan.Spec.BeforeSpawn = func(context.Context) error {
+		b, err := os.ReadFile(artifact) //nolint:gosec // G304: artifact is created in the test-owned directory
+		if err != nil {
+			return err
+		}
+		if sha256.Sum256(b) != digest {
+			return refusal
+		}
+		return nil
+	} //nolint:gosec // synthetic reviewed artifact is under the test's private directory
+	options := o
+	options.Callbacks = o.Callbacks
+	options.Callbacks.Plan = func(context.Context) (pluginhost.Plan, error) { return plan, nil }
+	options.Callbacks.PrepareScope = func(_ context.Context, _ pluginhost.Owner, p pluginhost.Plan) (pluginhost.Spec, error) {
+		return p.Spec, os.WriteFile(artifact, []byte("changed"), 0o600)
+	}
+	return append(cases, LifecycleAdapterCase{Name: "changed_reviewed_bytes", Plan: plan, Options: options, Refusal: refusal})
 }
