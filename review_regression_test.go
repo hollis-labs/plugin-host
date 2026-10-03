@@ -98,6 +98,9 @@ func TestDisableEpochCannotBeReopenedByQueuedEnable(t *testing.T) {
 	base := o.Callbacks.Plan
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
 	var slow atomic.Bool
 	o.Callbacks.Plan = func(ctx context.Context) (pluginhost.Plan, error) {
 		if slow.Load() {
@@ -128,7 +131,8 @@ func TestDisableEpochCannotBeReopenedByQueuedEnable(t *testing.T) {
 	if l.IsCurrent(owner) || l.Current() != nil || l.Status().DesiredEnabled {
 		t.Fatal("queued enable reopened a fenced generation")
 	}
-	close(release)
+	// Keep the callback blocked beyond cancellation grace and until both
+	// Disable and the queued Enable have observed its pending report.
 	if err := awaitResult(t, reload); err == nil {
 		t.Fatal("disable did not cancel reload")
 	}
@@ -138,6 +142,10 @@ func TestDisableEpochCannotBeReopenedByQueuedEnable(t *testing.T) {
 	if err := awaitResult(t, enabled); !errors.Is(err, pluginhost.ErrQuarantined) {
 		t.Fatal("pending plan did not quarantine", err)
 	}
+	if l.Status().State != pluginhost.StateQuarantined {
+		t.Fatal("Disable returned before recording the pending callback")
+	}
+	unblock()
 	for _, report := range l.Status().Disposals {
 		if report.Incomplete {
 			eventually(t, time.Second, "late plan reconciliation", func() bool { return l.AcknowledgeReport(context.Background(), report.ID) == nil })
