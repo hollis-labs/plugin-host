@@ -22,6 +22,10 @@ const (
 type Spec struct {
 	// ID names the plugin in errors before the child has introduced itself.
 	ID string
+	// ExpectedID and ExpectedVersion, when set, are checked after init and
+	// before load. ID itself remains the pre-handshake diagnostic label.
+	ExpectedID      string
+	ExpectedVersion string
 	// Command is the executable; Args its arguments; Dir its working
 	// directory (empty means this process's).
 	Command string

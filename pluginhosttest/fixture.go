@@ -83,6 +83,11 @@ const (
 
 	// BehaviourLoadSkips acknowledges load with one skipped declaration.
 	BehaviourLoadSkips = "load-skips"
+	// BehaviourUnloadError completes load but refuses unload. The host must
+	// still close stdin, reap the child and dispose its scope.
+	BehaviourUnloadError = "unload-error"
+	// BehaviourWrongID announces a different canonical plugin identity.
+	BehaviourWrongID = "wrong-id"
 
 	behaviorSleeper = "sleeper" // the wedge's grandchild
 )
@@ -172,7 +177,20 @@ func writePID(name string) { writeDirFile(name, strconv.Itoa(os.Getpid())) }
 // directory comes from the test that spawned this fixture, never from input.
 func writeDirFile(name, content string) {
 	if dir := os.Getenv(EnvDir); dir != "" {
-		_ = os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600) //nolint:gosec // test-owned temp dir named by the spawning test
+		// Publish a complete record atomically: a restart can write its pid while
+		// the parent is polling the previous one. Truncating the destination
+		// exposes an empty/intermediate record and makes the race fixture flaky.
+		f, err := os.CreateTemp(dir, ".fixture-record-*")
+		if err != nil {
+			return
+		}
+		path := f.Name()
+		defer func() { _ = os.Remove(path) }() //nolint:gosec // path is from CreateTemp under the spawning test's private directory
+		_, err = f.WriteString(content)
+		closeErr := f.Close()
+		if err == nil && closeErr == nil {
+			_ = os.Rename(path, filepath.Join(dir, name)) //nolint:gosec // fixed fixture record under the spawning test's private directory
+		}
 	}
 }
 
@@ -246,7 +264,7 @@ func (p *echoPlugin) Init(_ context.Context, params subprocess.InitParams) (subp
 	p.mu.Lock()
 	p.init = params
 	p.mu.Unlock()
-	return subprocess.InitResult{ID: "fixture", Name: "Fixture", Version: "test", Protocol: subprocess.ProtocolVersion}, nil
+	return subprocess.InitResult{ID: "fixture", Name: "Fixture", Version: "1.0.0", Protocol: subprocess.ProtocolVersion}, nil
 }
 
 func (p *echoPlugin) Load(context.Context) (subprocess.LoadResult, error) {
@@ -356,7 +374,7 @@ func (w *rawWriter) fail(id int64, code int, message string) {
 func runRaw(behavior string) int {
 	switch behavior {
 	case BehaviourHangOnInit, BehaviourBadProtocol, BehaviourNoID, BehaviourInitError, BehaviourLoadError,
-		BehaviourCrashOnCall, BehaviourGarbage, BehaviourExitAfterResponse, BehaviourWedge, BehaviourDeaf:
+		BehaviourCrashOnCall, BehaviourGarbage, BehaviourExitAfterResponse, BehaviourWedge, BehaviourDeaf, BehaviourUnloadError, BehaviourWrongID:
 	default:
 		fmt.Fprintf(os.Stderr, "pluginhosttest: unknown fixture behavior %q\n", behavior)
 		return 2
@@ -401,13 +419,16 @@ func handleRaw(behavior string, w *rawWriter, req rawRequest) (int, bool) {
 			w.fail(req.ID, subprocess.ErrCodeInternal, "init failed on purpose")
 			return 0, false
 		case BehaviourBadProtocol:
-			w.result(req.ID, subprocess.InitResult{ID: "fixture", Name: "Fixture", Version: "test", Protocol: 2})
+			w.result(req.ID, subprocess.InitResult{ID: "fixture", Name: "Fixture", Version: "1.0.0", Protocol: 2})
+			return 0, false
+		case BehaviourWrongID:
+			w.result(req.ID, subprocess.InitResult{ID: "other", Name: "Other", Version: "1.0.0", Protocol: subprocess.ProtocolVersion})
 			return 0, false
 		case BehaviourNoID:
-			w.result(req.ID, subprocess.InitResult{Name: "Fixture", Version: "test", Protocol: subprocess.ProtocolVersion})
+			w.result(req.ID, subprocess.InitResult{Name: "Fixture", Version: "1.0.0", Protocol: subprocess.ProtocolVersion})
 			return 0, false
 		default:
-			w.result(req.ID, subprocess.InitResult{ID: "fixture", Name: "Fixture", Version: "test", Protocol: subprocess.ProtocolVersion})
+			w.result(req.ID, subprocess.InitResult{ID: "fixture", Name: "Fixture", Version: "1.0.0", Protocol: subprocess.ProtocolVersion})
 			return 0, false
 		}
 	case subprocess.MethodLoad:
@@ -426,6 +447,10 @@ func handleRaw(behavior string, w *rawWriter, req rawRequest) (int, bool) {
 		return 0, false // unload included: the wedge answers nothing
 	}
 	if req.Method == subprocess.MethodUnload {
+		if behavior == BehaviourUnloadError {
+			w.fail(req.ID, subprocess.ErrCodeInternal, "unload refused")
+			return 0, false
+		}
 		w.result(req.ID, map[string]bool{"ok": true})
 		return 0, false
 	}

@@ -54,8 +54,9 @@ type Process struct {
 	info   subprocess.InitResult
 	loaded subprocess.LoadResult
 
-	stopOnce sync.Once
-	stopErr  error
+	stopOnce  sync.Once
+	stopErr   error
+	unloadErr error
 }
 
 // Spawn starts the plugin process and connects to it, without a handshake.
@@ -131,7 +132,7 @@ func Spawn(ctx context.Context, s Spec) (*Process, error) {
 func Start(ctx context.Context, s Spec) (*Process, error) {
 	p, err := Spawn(ctx, s)
 	if err != nil {
-		return nil, err
+		return nil, processFailure(s.ID, "spawn", err)
 	}
 	if _, _, err := p.Handshake(ctx); err != nil {
 		return nil, err
@@ -181,33 +182,63 @@ func (p *Process) Handshake(ctx context.Context) (subprocess.InitResult, subproc
 	return initResult, loadResult, nil
 }
 
+// processFailure retains classification and cause without echoing raw config.
+func processFailure(id, step string, err error) *Failure {
+	return &Failure{PluginID: id, Stage: StageLoad, Step: step, Code: step + "_failed", Retryable: IsTransient(err), Cause: err}
+}
+
 func (p *Process) handshake(ctx context.Context) (subprocess.InitResult, subprocess.LoadResult, error) {
-	label := p.spec.label()
+	result, err := p.initialize(ctx)
+	if err != nil {
+		return result, subprocess.LoadResult{}, err
+	}
+	if err = p.verify(result); err != nil {
+		return result, subprocess.LoadResult{}, err
+	}
+	loaded, err := p.load(ctx)
+	return result, loaded, err
+}
+
+func (p *Process) initialize(ctx context.Context) (subprocess.InitResult, error) {
 	result, err := p.client.Init(ctx, p.spec.Init)
 	if err != nil {
-		return result, subprocess.LoadResult{}, fmt.Errorf("pluginhost: %s: init: %w", label, err)
+		return result, processFailure(p.spec.ID, "init", err)
 	}
+	return result, nil
+}
+
+func (p *Process) verify(result subprocess.InitResult) error {
 	if result.Protocol != subprocess.ProtocolVersion {
-		return result, subprocess.LoadResult{}, fmt.Errorf(
-			"%w: %s speaks %d, this host speaks %d; the handshake is exact, so one of the two needs rebuilding",
-			ErrProtocolMismatch, label, result.Protocol, subprocess.ProtocolVersion)
+		return processFailure(p.spec.ID, "protocol", ErrProtocolMismatch)
 	}
 	if result.ID == "" {
-		return result, subprocess.LoadResult{}, fmt.Errorf("%w (%s)", ErrNoPluginID, label)
+		return processFailure(p.spec.ID, "identity", ErrNoPluginID)
+	}
+	if p.spec.ExpectedID != "" && result.ID != p.spec.ExpectedID {
+		return processFailure(p.spec.ID, "identity", ErrIdentityMismatch)
+	}
+	if p.spec.ExpectedVersion != "" {
+		_, err := CompareVersions(result.Version, p.spec.ExpectedVersion)
+		if err != nil || result.Version != p.spec.ExpectedVersion {
+			return processFailure(p.spec.ID, "version", errors.Join(ErrVersionMismatch, err))
+		}
 	}
 	p.mu.Lock()
 	p.info = result
 	p.mu.Unlock()
+	return nil
+}
 
+func (p *Process) load(ctx context.Context) (subprocess.LoadResult, error) {
 	loaded, err := p.client.Load(ctx)
 	if err != nil {
-		return result, loaded, fmt.Errorf("pluginhost: %s: load: %w", label, err)
+		return loaded, processFailure(p.spec.ID, "load", err)
 	}
 	p.mu.Lock()
 	p.loaded = loaded
 	p.loaded.SkippedRegistrations = slices.Clone(loaded.SkippedRegistrations)
 	p.mu.Unlock()
-	return result, loaded, nil
+	return loaded, nil
 }
 
 // Client returns the typed client over this process's connection.
@@ -318,10 +349,10 @@ func (p *Process) stop(ctx context.Context) error {
 	select {
 	case <-p.exited:
 	default:
-		// The answer is ignored on purpose: a plugin that refuses or cannot
+		// An unload failure is retained for lifecycle reports: a plugin that refuses or cannot
 		// answer plugin/unload is exactly the one the stronger steps exist
 		// for, and it is stopped correctly anyway.
-		_ = p.client.Unload(graceful)
+		p.unloadErr = p.client.Unload(graceful)
 		// Closing stdin is the SDK's own shutdown path. It is done whether or
 		// not the unload call worked.
 		_ = p.stdin.Close()
@@ -339,4 +370,11 @@ func (p *Process) stop(ctx context.Context) error {
 	}
 	_ = p.conn.Close()
 	return err
+}
+
+// stopWithReport retains the unload error for lifecycle disposal while Stop's
+// process-only contract continues to report failure to reap.
+func (p *Process) stopWithReport(ctx context.Context) (error, error) {
+	err := p.Stop(ctx)
+	return p.unloadErr, err
 }

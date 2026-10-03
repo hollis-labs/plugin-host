@@ -12,6 +12,9 @@ import (
 type SuperviseOptions struct {
 	// Policy is the restart budget and backoff.
 	Policy RestartPolicy
+	// ClassifyExit must return a typed TransientError to permit restarting.
+	// Nil means unexpected exits are terminal. Never infer transience from a timeout.
+	ClassifyExit func(ExitInfo) error
 
 	// HealthInterval, when positive, probes plugin/health that often
 	// (Nanite and mcp-host style). Each probe is bounded by HealthTimeout
@@ -210,12 +213,17 @@ func (s *Supervisor) run(p *Process) {
 func (s *Supervisor) restart(crashed *Process, info ExitInfo) (*Process, bool) {
 	notified := false
 	var lastErr error
+	if s.opts.ClassifyExit != nil {
+		lastErr = s.opts.ClassifyExit(info)
+	}
+	retryable := IsTransient(lastErr)
 	for {
 		s.mu.Lock()
 		attempt := s.restarts
 		s.mu.Unlock()
 
 		delay, allowed := s.opts.Policy.Backoff(attempt)
+		allowed = allowed && retryable
 		if !notified {
 			notified = true
 			if s.opts.OnExit != nil {
@@ -252,6 +260,7 @@ func (s *Supervisor) restart(crashed *Process, info ExitInfo) (*Process, bool) {
 		if err != nil {
 			s.mu.Unlock()
 			lastErr = err
+			retryable = IsTransient(err)
 			continue
 		}
 		s.cur = next
@@ -267,7 +276,7 @@ func (s *Supervisor) giveUp(crashed *Process, attempt int, lastErr error) {
 	if s.opts.OnGiveUp == nil {
 		return
 	}
-	err := fmt.Errorf("pluginhost: %s crashed and its restart budget is spent after %d restarts%s",
+	err := fmt.Errorf("pluginhost: %s stopped after %d restarts (terminal failure or exhausted budget)%s",
 		s.spec.label(), attempt, crashed.diagnosticsText())
 	if lastErr != nil {
 		err = fmt.Errorf("%w; last restart failed: %w", err, lastErr)

@@ -7,6 +7,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Write the entry for a release here BEFORE cutting its tag: the release workflow
 refuses a tag whose CHANGELOG has no heading for it.
 
+## Unreleased
+
+### Added
+
+- Per-plugin `Lifecycle` with staged planning, compatibility checks, persisted
+  generation issuance, enable/disable/reload, scope callbacks, dispatch fencing,
+  finite classified retries and deterministic disposal reports/quarantine.
+- `Stage`, `Failure`, `TransientError`, `DisposalReport`, and pure inclusive
+  semantic-version bounds with explicit prerelease policy.
+- Expected wire identity/version verification between init and load.
+- Separate real-process lifecycle conformance harness, R19–R27, without waivers.
+
+### Changed
+
+- Unexpected exits are terminal unless explicitly classified transient;
+  standalone Supervisor requires `ClassifyExit`. Failed restart handshakes
+  only retry explicitly transient errors. Lifecycle owns its own single loop.
+
 ## v0.1.2 — 2026-10-02
 
 ### Added
