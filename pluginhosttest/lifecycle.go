@@ -436,6 +436,7 @@ func (e *lifecycleEnv) disable() {
 	}
 }
 func (e *lifecycleEnv) reload() {
+	e.reloadDeadline()
 	p := e.plan(BehaviourEcho)
 	o := e.options(p)
 	registry := &scopeRegistry{}
@@ -481,6 +482,67 @@ func (e *lifecycleEnv) reload() {
 		e.t.Fatal("silently restored old generation")
 	}
 }
+
+// Both cooperative and still-running preflight timeouts retain serving authority.
+func (e *lifecycleEnv) reloadDeadline() {
+	for _, cooperative := range []bool{true, false} {
+		p := e.plan(BehaviourEcho)
+		o := e.options(p)
+		o.CallbackTimeout = 30 * time.Millisecond
+		var slow atomic.Bool
+		release := make(chan struct{})
+		o.Callbacks.BeforeReload = func(ctx context.Context) error {
+			if cooperative {
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			<-release
+			return nil
+		}
+		o.Callbacks.Plan = func(ctx context.Context) (pluginhost.Plan, error) {
+			if slow.Load() {
+				<-ctx.Done()
+				return pluginhost.Plan{}, ctx.Err()
+			}
+			return p, nil
+		}
+		l := e.new(o)
+		e.enable(l)
+		old, owner := l.Current(), l.Status().Owner
+		if !errors.Is(l.Reload(context.Background()), context.DeadlineExceeded) {
+			e.t.Fatal("reload callback timeout lost")
+		}
+		if l.Current() != old || !l.IsCurrent(owner) || l.Status().State != pluginhost.StateRunning || l.Status().LastFailure == nil {
+			e.t.Fatal("timed-out reload preflight invalidated serving authority")
+		}
+		if err := l.Enable(context.Background()); err != nil {
+			e.t.Fatal("serving Enable lost idempotence", err)
+		}
+		if !cooperative && !errors.Is(l.Reload(context.Background()), pluginhost.ErrQuarantined) {
+			e.t.Fatal("next reload ignored pending callback")
+		}
+		close(release)
+		for _, r := range l.Status().Disposals {
+			if r.Incomplete {
+				e.await("late preflight reconciliation", func() bool { return l.AcknowledgeReport(context.Background(), r.ID) == nil })
+			}
+		}
+		// Also exercise the Plan timeout, independently of BeforeReload.
+		o.Callbacks.BeforeReload = nil
+		_ = l.Disable(context.Background())
+		// Fresh controller and epoch keep this case independent of its prior report.
+		o.HostInstance, _ = pluginhost.NewHostInstance()
+		l = e.new(o)
+		e.enable(l)
+		old, owner = l.Current(), l.Status().Owner
+		slow.Store(true)
+		if !errors.Is(l.Reload(context.Background()), context.DeadlineExceeded) || l.Current() != old || !l.IsCurrent(owner) || l.Status().State != pluginhost.StateRunning {
+			e.t.Fatal("cooperative Plan timeout killed serving generation")
+		}
+		_ = l.Disable(context.Background())
+	}
+}
+
 func (e *lifecycleEnv) cleanup() {
 	e.uncooperativeCallbacks()
 	// Cleanup callbacks may inspect the controller without its mutex held.

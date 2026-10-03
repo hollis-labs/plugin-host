@@ -25,6 +25,12 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Changed
 
+- Cooperative cancellation receives a bounded grace before pending quarantine;
+  reload preflight timeouts preserve the serving generation and failure status.
+- BeforeDisable and Supervisor classification are bounded; snapshot revisions
+  fail closed at exhaustion. Exact report acknowledgement and revision conflicts
+  have dedicated regressions and documented host storage requirements.
+
 - Unexpected exits are terminal unless explicitly classified transient;
   standalone Supervisor requires `ClassifyExit`. Failed restart handshakes
   only retry explicitly transient errors. Lifecycle owns its own single loop.

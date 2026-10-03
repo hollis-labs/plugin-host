@@ -254,9 +254,6 @@ func (l *Lifecycle) preflightFailure(stage Stage, step string, err error) *Failu
 	var pending *pendingCallbackError
 	if errors.As(err, &pending) {
 		l.notePending(Owner{HostInstance: l.opts.HostInstance, OwnerID: l.id}, step, pending.Done, err)
-		if old := l.detach(); old != nil {
-			l.dispose(old)
-		}
 		persistCtx, cancel := context.WithTimeout(context.Background(), l.opts.CleanupTimeout)
 		if e := l.persist(persistCtx); e != nil {
 			var p *pendingCallbackError
@@ -311,7 +308,7 @@ func (l *Lifecycle) begin(ctx context.Context, rev uint64, enabling bool) (conte
 	if l.revision != rev || (!enabling && !l.status.DesiredEnabled) {
 		return nil, nil, ErrDisabled
 	}
-	if l.quarantined() {
+	if l.quarantined() && !(enabling && l.current != nil && l.current.epoch == l.revision && l.status.State == StateRunning) {
 		return nil, nil, ErrQuarantined
 	}
 	if err := ctx.Err(); err != nil {
@@ -409,7 +406,11 @@ func (l *Lifecycle) Reload(ctx context.Context) error {
 	defer l.end()
 	if l.opts.Callbacks.BeforeReload != nil {
 		if _, err = loadValue(op, l, func(c context.Context) (struct{}, error) { return struct{}{}, l.opts.Callbacks.BeforeReload(c) }); err != nil {
-			return l.preflightFailure(StagePlan, "reload", err)
+			f := l.preflightFailure(StagePlan, "reload", err)
+			l.mu.Lock()
+			l.status.LastFailure = f
+			l.mu.Unlock()
+			return f
 		}
 	}
 	p, f := l.preflight(op)
@@ -434,8 +435,8 @@ func (l *Lifecycle) Reload(ctx context.Context) error {
 // serializes teardown. Even if ctx expires the fence remains in place.
 func (l *Lifecycle) Disable(ctx context.Context) error {
 	if l.opts.Callbacks.BeforeDisable != nil {
-		if err := callback(ctx, func() error { return l.opts.Callbacks.BeforeDisable(ctx) }); err != nil {
-			return l.failure(StagePlan, "disable", 0, err)
+		if _, err := loadValue(ctx, l, func(c context.Context) (struct{}, error) { return struct{}{}, l.opts.Callbacks.BeforeDisable(c) }); err != nil {
+			return l.preflightFailure(StagePlan, "disable", err)
 		}
 	}
 	l.mu.Lock()

@@ -15,6 +15,8 @@ type SuperviseOptions struct {
 	// ClassifyExit must return a typed TransientError to permit restarting.
 	// Nil means unexpected exits are terminal. Never infer transience from a timeout.
 	ClassifyExit func(ExitInfo) error
+	// ClassifyTimeout bounds exit classification (default 10s). Stop cancels it.
+	ClassifyTimeout time.Duration
 
 	// HealthInterval, when positive, probes plugin/health that often
 	// (Nanite and mcp-host style). Each probe is bounded by HealthTimeout
@@ -219,7 +221,13 @@ func (s *Supervisor) restart(crashed *Process, info ExitInfo) (*Process, bool) {
 	notified := false
 	var lastErr error
 	if s.opts.ClassifyExit != nil {
-		lastErr = callback(s.ctx, func() error { return s.opts.ClassifyExit(info) })
+		timeout := s.opts.ClassifyTimeout
+		if timeout <= 0 {
+			timeout = 10 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(s.ctx, timeout)
+		_, _, lastErr = isolated(ctx, func() (struct{}, error) { return struct{}{}, s.opts.ClassifyExit(info) })
+		cancel()
 	}
 	retryable := IsTransient(lastErr)
 	for {

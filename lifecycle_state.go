@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 )
 
 // MaxOwnerGeneration is the largest integer represented exactly by Go/JS
 // authority DTOs. Exhaustion fails closed; never wrap or reuse a generation.
 const MaxOwnerGeneration uint64 = 9007199254740991
+
+// MaxLifecycleRevision bounds persisted snapshot ordering; exhaustion fails closed.
+const MaxLifecycleRevision uint64 = MaxOwnerGeneration
 
 // LifecycleRecord persists an epoch-specific generation watermark and owner
 // disposal history across host restarts.
@@ -51,7 +55,7 @@ func (s *MemoryLifecycleStateStore) Load(ctx context.Context, id string) (Lifecy
 	return cloneRecord(s.records[id]), nil
 }
 func (s *MemoryLifecycleStateStore) Save(ctx context.Context, id string, r LifecycleRecord) error {
-	if len(r.Disposals) > MaxDisposalRecords {
+	if len(r.Disposals) > MaxDisposalRecords || r.Revision > MaxLifecycleRevision {
 		return ErrInvalidLifecycleRecord
 	}
 	if err := ctx.Err(); err != nil {
@@ -161,7 +165,7 @@ func (l *Lifecycle) restore(r LifecycleRecord) error {
 	processLedger.Lock()
 	defer processLedger.Unlock()
 	a := ledgerRecord(l.key())
-	if r.LastGeneration > MaxOwnerGeneration || len(r.Disposals) > MaxDisposalRecords || (r.LastGeneration > 0 && r.HostInstance == "") {
+	if r.Revision >= MaxLifecycleRevision || r.LastGeneration > MaxOwnerGeneration || len(r.Disposals) > MaxDisposalRecords || (r.LastGeneration > 0 && r.HostInstance == "") {
 		return ErrInvalidLifecycleRecord
 	}
 	if r.Active != nil && (r.Active.OwnerID != l.id || r.Active.HostInstance == "" || r.Active.OwnerGeneration == 0 || r.Active.OwnerGeneration > MaxOwnerGeneration) {
@@ -222,6 +226,9 @@ func (l *Lifecycle) reserve(g uint64) error {
 	processLedger.Lock()
 	defer processLedger.Unlock()
 	a := ledgerRecord(l.key())
+	if a.record.Revision >= MaxLifecycleRevision-4 {
+		return ErrInvalidLifecycleRecord
+	}
 	if g == 0 || g > MaxOwnerGeneration || g <= a.record.LastGeneration {
 		return ErrInvalidGeneration
 	}
@@ -236,9 +243,14 @@ func (l *Lifecycle) recordDisposal(r DisposalReport, pending []<-chan struct{}) 
 	defer processLedger.Unlock()
 	a := ledgerRecord(l.key())
 	a.record.HostInstance = l.opts.HostInstance
-	a.record.Revision++
+	if a.record.Revision < MaxLifecycleRevision {
+		a.record.Revision++
+	} else {
+		r.Incomplete = true
+		r.Failures = append(r.Failures, CleanupFailure{Step: "revision", Cause: ErrInvalidLifecycleRecord})
+	}
 	if r.ID == "" {
-		r.ID = fmt.Sprintf("%s#%d", l.opts.HostInstance, a.record.Revision)
+		r.ID = fmt.Sprintf("%s#%d/%d", l.opts.HostInstance, a.record.Revision, len(a.record.Disposals))
 	}
 	found := false
 	for i := range a.record.Disposals {
@@ -290,7 +302,9 @@ func (l *Lifecycle) notePending(owner Owner, step string, done <-chan struct{}, 
 	r := l.recordDisposal(DisposalReport{Owner: owner, Incomplete: true, Failures: []CleanupFailure{{Step: step, Cause: cause}}}, []<-chan struct{}{done})
 	l.mu.Lock()
 	l.status.Disposal = r
-	l.status.State = StateQuarantined
+	if l.current == nil || !l.status.DesiredEnabled || l.current.epoch != l.revision {
+		l.status.State = StateQuarantined
+	}
 	l.mu.Unlock()
 }
 func (l *Lifecycle) quarantined() bool {
@@ -306,7 +320,7 @@ func (l *Lifecycle) persist(ctx context.Context) error {
 		return nil
 	}
 	r := l.history()
-	if len(r.Disposals) > MaxDisposalRecords {
+	if len(r.Disposals) > MaxDisposalRecords || r.Revision > MaxLifecycleRevision {
 		return ErrInvalidLifecycleRecord
 	}
 	_, done, err := isolated(ctx, func() (struct{}, error) { return struct{}{}, l.opts.StateStore.Save(ctx, l.id, r) })
@@ -362,6 +376,10 @@ func (l *Lifecycle) AcknowledgeReport(ctx context.Context, id string) error {
 	if r.Disposals[index].Acknowledged {
 		processLedger.Unlock()
 		return nil
+	}
+	if a.record.Revision >= MaxLifecycleRevision {
+		processLedger.Unlock()
+		return ErrInvalidLifecycleRecord
 	}
 	a.record.Revision++
 	r.Revision = a.record.Revision
@@ -445,6 +463,15 @@ func isolated[T any](ctx context.Context, fn func() (T, error)) (T, <-chan struc
 		return r.value, nil, r.err
 	case <-ctx.Done():
 		var zero T
-		return zero, done, ctx.Err()
+		// Give cooperative callbacks a bounded chance to observe cancellation.
+		// Never publish a result produced after cancellation.
+		grace := time.NewTimer(25 * time.Millisecond)
+		defer grace.Stop()
+		select {
+		case r := <-reply:
+			return zero, nil, errors.Join(ctx.Err(), r.err)
+		case <-grace.C:
+			return zero, done, ctx.Err()
+		}
 	}
 }

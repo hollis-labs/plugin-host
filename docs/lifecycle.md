@@ -227,3 +227,18 @@ Each application must test its
 actual registrations, review, durable preference and credential implementation.
 This change includes no application adoption, reverse RPC, SDK protocol-2 DTO,
 release or tag.
+
+Cancelled callbacks have a 25ms grace to return before being tracked as still
+running. Late results never activate a generation. A failed reload preflight
+retains the serving generation and records LastFailure; pending candidate work
+blocks another reload while serving dispatch and idempotent Enable remain valid.
+BeforeDisable is bounded by CallbackTimeout and refuses before changing intent.
+Persisted revisions are bounded by MaxLifecycleRevision; invalid or exhausted
+ordering fails closed instead of wrapping. Supervisor exit classification is
+bounded by ClassifyTimeout (default 10s) and cancelled by Stop.
+
+Hosts running lifecycle conformance must additionally test exact report-ID
+acknowledgement with multiple unresolved reports, durable quarantine and active
+checkpoints across host epochs, acknowledgement Save failures/timeouts, and
+revision conflicts with concurrent disposal. Use the actual storage adapter;
+synthetic persistence cases cannot certify these durable guarantees.
