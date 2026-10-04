@@ -151,9 +151,6 @@ func startInteropExpanded(t *testing.T, runtime string, recipe interopRecipeRow,
 	if len(configured) != 0 {
 		s = configured[0]
 	}
-	if recipe.Scenario == "deadline" {
-		s.ConnOptions = append(s.ConnOptions, WithDefaultTimeout(0))
-	}
 	p, c := spawnInteropChild(t, runtime, recipe.Profile, b.services(), s)
 	c.expandedReverseLimit = s.Init.HostServices.Limits.PluginToHostInflight
 	if _, err := c.event("ready"); err != nil {
@@ -544,60 +541,11 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 				observations = append(observations, observation)
 				continue
 			}
-			supported := recipe.Scenario == "reverse" || recipe.Scenario == "effects" || recipe.Scenario == "unknown" || recipe.Scenario == "overflow" || recipe.Scenario == "cleanup-error" || recipe.Scenario == "cleanup-panic" || recipe.Scenario == "cleanup-hung" || recipe.Scenario == "receipt-restart" || recipe.Scenario == "descendants"
+			supported := recipe.Scenario == "reverse" || recipe.Scenario == "effects" || recipe.Scenario == "unknown" || recipe.Scenario == "overflow" || recipe.Scenario == "cleanup-error" || recipe.Scenario == "cleanup-panic" || recipe.Scenario == "cleanup-hung" || recipe.Scenario == "receipt-restart" || recipe.Scenario == "descendants" || recipe.Scenario == "deadline"
 			if !supported {
 				observation["status"] = "pending"
 				observation["owner"] = "plugin-host interop adapter (slice5)"
 				observation["reason"] = "Scenario handler pending; no execution claimed"
-				if recipe.Scenario == "deadline" {
-					observation["owner"] = "plugin-host finite-parent contract owner (orch-pp0)"
-					observation["reason"] = "Full authored raw absence/remote deadline vector incompatible with finite-parent host: zero deadline refuses parent registration, local/wire budgets coupled. No weakened or derived pass."
-					observation["source_available"] = true
-					observation["host_supported"] = false
-					t.Run(runtime+"/"+recipe.Name+"/local-prepublication-refusal", func(t *testing.T) {
-						b := &interopBackend{receipts: map[string]subprocess.StoragePutResult{}, inputs: map[string][32]byte{}}
-						p, c := startInteropExpanded(t, runtime, recipe, b)
-						p.conn.mu.Lock()
-						before := p.conn.nextID.Load()
-						p.conn.mu.Unlock()
-						params := subprocess.CommandExecParams{Name: "hold", Args: "{}", SessionID: ""}
-						_, err := p.Client().CommandExecute(context.Background(), params)
-						var refusal *capability.Error
-						if !errors.As(err, &refusal) || refusal.Code != capability.TargetUnavailable {
-							t.Fatal("absent-context refusal", err)
-						}
-						p.conn.mu.Lock()
-						after := p.conn.nextID.Load()
-						p.conn.mu.Unlock()
-						if after != before+1 {
-							t.Fatal("refused call did not reach selected-ID attachment", before, after)
-						}
-						observation["raw_refusal"] = map[string]any{"caller_params": params, "caller_context": nil, "binding": nil, "publication": false, "child_wire_evidence": nil, "error": err.Error(), "code": refusal.Code, "backend_count": len(b.calls)}
-						_, healthErr := p.conn.Call(context.Background(), subprocess.MethodHealth, json.RawMessage(`{}`))
-						var healthRefusal *capability.Error
-						if !errors.As(healthErr, &healthRefusal) || healthRefusal.Code != capability.TargetUnavailable {
-							t.Fatal("absent-context health refusal", healthErr)
-						}
-						if p.conn.nextID.Load() != after+1 {
-							t.Fatal("health refusal did not reach selected-ID attachment")
-						}
-						observation["health_raw_refusal"] = map[string]any{"method": subprocess.MethodHealth, "caller_params": json.RawMessage(`{}`), "caller_context": nil, "binding": nil, "publication": false, "child_wire_evidence": nil, "error": healthErr.Error(), "code": healthRefusal.Code, "backend_count": len(b.calls)}
-
-						observation["refusal_finished"] = finishInteropExpanded(t, p, c, 0)
-						for _, event := range c.observed {
-							var direction string
-							_ = json.Unmarshal(event["direction"], &direction)
-							if direction != "host-to-worker" {
-								continue
-							}
-							if method := rawEventString(event, "method"); method == "command/execute" || method == subprocess.MethodHealth {
-								t.Fatal("locally refused command reached child", event)
-							}
-						}
-						observation["refusal_wire_control_events"] = c.observed
-					})
-
-				}
 				observations = append(observations, observation)
 				continue
 			}
@@ -607,6 +555,8 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 				b := &interopBackend{receipts: map[string]subprocess.StoragePutResult{}, inputs: map[string][32]byte{}}
 				p, c := startInteropExpanded(t, runtime, recipe, b)
 				switch recipe.Scenario {
+				case "deadline":
+					replayInteropRawDeadline(t, p, c, b, observation)
 				case "reverse":
 					replayInteropReverse(t, p, c, b)
 				case "descendants":
@@ -646,6 +596,9 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 				if observation["finished"] == nil {
 					observation["finished"] = finishInteropExpanded(t, p, c, 0)
 				}
+				if recipe.Scenario == "deadline" {
+					auditInteropRawDeadline(t, c.observed)
+				}
 				observation["reaped"] = true
 				exit, _ := p.ExitInfo()
 				observation["exit_code"] = exit.Code
@@ -666,7 +619,9 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 				observation["worker_command_env"] = p.spec.Env
 				observation["bridge_command"] = p.spec.Command
 				observation["bridge_args"] = p.spec.Args
-				observation["projection"] = "Actual Init+Load lifecycle and host-minted binding; command IDs follow lifecycle; authored expanded 10000ms method ceilings"
+				if recipe.Scenario != "deadline" {
+					observation["projection"] = "Actual Init+Load lifecycle and host-minted binding; command IDs follow lifecycle; authored expanded 10000ms method ceilings"
+				}
 				if recipe.Scenario == "cleanup-hung" {
 					observation["terminal_parent_timeout_ms"] = 300
 				}
@@ -728,7 +683,7 @@ func interopProvenance(t *testing.T) map[string]any {
 		goBuildCommand = fmt.Sprintf("GOWORK=off go test -p 2 -race -c ./subprocess -o %s (cwd=%s)", os.Getenv("INTEROP_GO_CHILD"), source)
 		tsBuildCommand = fmt.Sprintf("npm ci --ignore-scripts && npm run build (cwd=%s)", filepath.Join(source, "ts"))
 	}
-	return map[string]any{"asset_sha256": assetHashes, "asset_build_commands": []string{goBuildCommand, tsBuildCommand}, "sdk_source": "ea8ec0dca862d0c7284cc6a130a4b27fb812ed21", "sdk_module": "5c663e7ce74c40ceceb95133c439396316850858", "sdk_base": "d04ab2149506a96e8c54b58829f58ee480e0de41", "host_base": "60d0b318c264c7ea0dd11bef0731199a3eedadd9", "host_commit": os.Getenv("INTEROP_HOST_COMMIT"), "host_dirty": os.Getenv("INTEROP_HOST_DIRTY") == "true", "manifest_sha256": fmt.Sprintf("%x", digest), "corpus_version": 1, "selector_version": 1, "go_build_receipt": string(build), "ts_build_receipt": string(tsBuild), "runtime_versions": map[string]string{"go": os.Getenv("INTEROP_GO_VERSION"), "node": os.Getenv("INTEROP_NODE_VERSION"), "deno": os.Getenv("INTEROP_DENO_VERSION")}, "scope": "Finite-parent implemented subset only; no full0189/0172 gate or unqualified profile conformance", "named_limitation": map[string]any{"case": "arrival-deadline-and-absent-context", "status": "pending", "source_available": true, "host_supported": false, "reason": "Exact host requires finite parent; remote-only deadline and absent-context full case incompatible", "owner": "orch-pp0 host/protocol contract owners"}}
+	return map[string]any{"asset_sha256": assetHashes, "asset_build_commands": []string{goBuildCommand, tsBuildCommand}, "sdk_source": "ea8ec0dca862d0c7284cc6a130a4b27fb812ed21", "sdk_module": "5c663e7ce74c40ceceb95133c439396316850858", "sdk_base": "d04ab2149506a96e8c54b58829f58ee480e0de41", "host_base": "60d0b318c264c7ea0dd11bef0731199a3eedadd9", "host_commit": os.Getenv("INTEROP_HOST_COMMIT"), "host_dirty": os.Getenv("INTEROP_HOST_DIRTY") == "true", "manifest_sha256": fmt.Sprintf("%x", digest), "corpus_version": 1, "selector_version": 1, "go_build_receipt": string(build), "ts_build_receipt": string(tsBuild), "runtime_versions": map[string]string{"go": os.Getenv("INTEROP_GO_VERSION"), "node": os.Getenv("INTEROP_NODE_VERSION"), "deno": os.Getenv("INTEROP_DENO_VERSION")}, "scope": "OptionB implementation receipts for selected supported scenarios only; missing mandatory0189/0172/0163 evidence remains open; no unqualified profile or Phase1 acceptance", "transport_base": "98a79bdee1c44d8582c4bc1b8a4395f728057099", "historical_limitation": map[string]any{"case": "arrival-deadline-and-absent-context", "status_at_60d0b318": "pending_host_unsupported", "current_status": "See actual per-runtime raw case execution rows; no pass from implementation alone", "owner": "orch-pp0 host/protocol contract owners"}}
 }
 
 func rawEventString(event map[string]json.RawMessage, key string) string {

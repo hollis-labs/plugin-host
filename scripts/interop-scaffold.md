@@ -51,17 +51,28 @@ test host policy ceiling to 20ms, proving that host receipt-clock expiry
 independently prevents backend entry and delivers the definite typed refusal.
 Neither derived witness is the FULL shared deadline vector.
 
-**Named limitation:** the FULL authored `arrival-deadline-and-absent-context`
-case at exact `ea8ec0d` is source-available, host-unsupported and
-PENDING/incompatible on host base `60d0b318`. The host requires finite parents
-and couples local/wire budgets. The raw no-context rejection is local before
-publication, with exact caller params/context, `publication=false`, no child
-command wire and zero backend calls. A derived 300ms caller timeout cannot
-prove the authored remote-only deadline; the earlier Node `deadline=false`
-receipt remains historical failure evidence. Architect 12203 permits review
-of the finite-parent subset only. This is no full 0189/0172 interop gate,
-unqualified negotiated-profile conformance, release or live activation.
-Future contract changes require a separate decision.
+**Current boundary:** approved OptionB adds explicit public `CallCorrelation`
+for CommandExecute/Health with a finite local observer independent of authored
+wire context. The raw `arrival-deadline-and-absent-context` handler preserves
+remote300 and literal non-authorizing `binding-example`, then truly absent
+hold/Health context. It requires actual published-ID+command event matching,
+SDK deadline cause, unknown/unknown terminal, returned0 until explicit release,
+interleaved Health, no backend authority/effects, physical publication, natural
+exit/cleanup/reap and strict EOF accounting for Go/Node/Deno. Actual execution
+rows, not implementation or inventory, determine its result. Separate observer
+expiry probes prove transport-cancel cause and actual control receipt provenance;
+inert-selector helper probes prove typed no-effect refusal. Neither substitutes
+for raw remote expiry.
+
+Historical finite-parent PR14 receipts at `60d0b318` and raw local prepublication
+refusals remain preserved, along with the earlier derived Node deadline=false
+failure. New reports must identify their actual host head/dirty state and reuse
+source-keyed build receipts without overwriting historical reports. Raw repeated
+and absent-context Load in forward/credits remains PENDING/incompatible with
+unchanged finite lifecycle policy. Other mandatory queue/fairness/control and
+0163 application/security/hook obligations remain named pending. There is no
+full0189/0172 acceptance, unqualified profile claim, release or live activation
+from raw-case repair or these isolated receipts.
 
 Reports and run logs stay in `TMPDIR/plugin-host-interop-<source>/`:
 `report.json` (inventory), `control-report.json`, `replay-report.json`, and

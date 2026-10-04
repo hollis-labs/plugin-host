@@ -316,6 +316,7 @@ func (w *interopEventWriter) failure() error {
 }
 
 type interopControls struct {
+	hostCancelEvidence   map[uint64]interopHostCancelEvidence
 	expandedReverseLimit uint32
 	socket               net.Conn
 	events               chan map[string]json.RawMessage
@@ -463,7 +464,7 @@ func (c *interopControls) finish(expectedCode int) error {
 			if exits != 1 || finished != 1 {
 				return fmt.Errorf("harness terminal receipts exits=%d finished=%d", exits, finished)
 			}
-			if err := interopWireTerminals(c.observed, expectedCode); err != nil {
+			if err := interopWireTerminals(c.observed, expectedCode, c.hostCancelEvidence); err != nil {
 				return err
 			}
 			if c.expandedReverseLimit != 0 {

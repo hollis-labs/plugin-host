@@ -52,6 +52,46 @@ clips its lease to five minutes, root/parent and current grant limits. Grant
 replacement fences changed authority even when a revision label was reused.
 Revocation cancels descendants immediately and never waits for a backend.
 
+## Correlation-only forward calls
+
+`Conn.CallCorrelation(observer, method, params)` is an explicit opt-in for
+`command/execute` and `plugin/health` after negotiated host activation. The
+passed observer must have a positive finite deadline. Constructor/default
+timeouts supply neither that observer nor remote wire context. An absent
+`params.context` stays absent; a supplied positive timeout starts a separate
+monotonic send budget before encoding/admission and clips at publication.
+After a complete write, its expiry does not cancel the local observer: the
+receiver owns its remote deadline terminal. Caller cancel and observer expiry
+instead send actual directional controls with `caller_cancelled` and
+`deadline_exceeded`, respectively.
+
+These bounded transport records are not `HostSession` parents and mint no
+bindings, grants, root, ancestry or depth. Syntactically valid opaque selectors
+are transported unchanged, including fixture literals, but helper admission
+still requires a genuine connection/binding/actual authority parent. An inert
+selector can expose an SDK client object while every attempted host effect
+remains unauthorized. Explicit `WithHostBinding`/`WithForwardBinding` conflicts
+refuse. Configured lifecycle binding is never injected into this path.
+
+Conn rechecks its host-owned incarnation/business fence at selected-ID
+registration before bytes. Revoke/disable cancels queued/published correlation
+calls; crash/close retires their transport receipts. Genuine finite authority
+parents and isolated finite Unload log authority are unchanged. Incomplete
+write deadline is the minimum observer/send budget/negotiated write bound:
+proven zero bytes means no publication, partial writes fence with uncertainty,
+and complete writes retain their physical receipt independently of local return.
+Local errors never manufacture remote terminals or imply rollback; no automatic
+retry follows a lost result. `CorrelationCallError` reports only closed local
+validation refusals.
+
+Every host reverse request and authority-bearing parent remains finite under
+caller/root/parent/binding/grant/method/received minima. The explicit exception
+is non-authority forward correlation with absent wire context, not an infinite
+lease or a widened profile. The isolated adapter records exact raw deadline
+and absence assertions separately from observer-cancellation and inert-selector
+negative probes. Remaining mandatory lifecycle saturation/counter, fairness,
+security/application and hook obligations keep full 0189/0172 acceptance open.
+
 ## Backend contract
 
 `HostServices` has ten typed business callbacks and two typed optional vetoes

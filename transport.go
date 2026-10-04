@@ -27,26 +27,46 @@ type callReply struct {
 	err        error
 }
 type pendingCall struct {
-	session   *HostSession
-	prepared  *preparedHostBinding
-	method    string
-	ctx       context.Context
-	end       context.CancelFunc
-	reply     chan callReply
-	id        subprocess.RPCID // protected by Conn.mu; assigned only at writer selection
-	frame     *queuedFrame
-	credit    *terminalCredit
-	lifecycle bool
+	correlation  bool
+	incarnation  *reverseConnection
+	sendDeadline time.Time
+	stop         context.CancelFunc
+	publication  forwardPublication
+	released     bool
+	terminal     bool
+	session      *HostSession
+	prepared     *preparedHostBinding
+	method       string
+	ctx          context.Context
+	end          context.CancelFunc
+	reply        chan callReply
+	id           subprocess.RPCID // protected by Conn.mu; assigned only at writer selection
+	frame        *queuedFrame
+	credit       *terminalCredit
+	lifecycle    bool
+}
+
+// forwardPublication is protected by Conn.mu. A local waiter result never
+// substitutes for this physical receipt. selected IDs are never reused.
+type forwardPublication struct {
+	bytes           int
+	complete        bool
+	err             error
+	cancelReason    subprocess.CancelReason
+	cancelComplete  bool
+	cancelErr       error
+	cancelRequested error
 }
 type outboundFrame struct {
-	ctx       context.Context
-	call      *pendingCall
-	budget    int
-	idSlot    int
-	written   chan error
-	cancel    bool
-	inboundID subprocess.RPCID
-	receipt   *reverseReceipt
+	ctx        context.Context
+	call       *pendingCall
+	budget     int
+	idSlot     int
+	written    chan error
+	cancel     bool
+	inboundID  subprocess.RPCID
+	receipt    *reverseReceipt
+	cancelCall *pendingCall
 }
 
 func lifecycleMethod(method string) bool {
@@ -60,12 +80,30 @@ func (c *Conn) signalWriter() {
 }
 
 func (c *Conn) queueCall(ctx context.Context, method string, params any) (*pendingCall, error) {
-	call := &pendingCall{ctx: ctx, method: method, reply: make(chan callReply, 1), lifecycle: lifecycleMethod(method)}
+	return c.queueCallClass(ctx, method, params, false)
+}
+func (c *Conn) queueCallClass(ctx context.Context, method string, params any, correlation bool) (*pendingCall, error) {
+	started := time.Now()
+	call := &pendingCall{ctx: ctx, method: method, reply: make(chan callReply, 1), lifecycle: lifecycleMethod(method), correlation: correlation}
+	if correlation {
+		call.ctx, call.stop = context.WithCancel(ctx) //nolint:gosec // stop is owned by admission refusal, releaseCall and irreversible fence paths.
+		ctx = call.ctx
+	}
 	c.mu.Lock()
 	if c.closedBy != nil || c.configError != nil {
 		err := errors.Join(c.closedBy, c.configError)
 		c.mu.Unlock()
+		if call.stop != nil {
+			call.stop()
+		}
 		return nil, err
+	}
+	if correlation {
+		if err := c.correlationReadyLocked(call); err != nil {
+			c.mu.Unlock()
+			call.stop()
+			return nil, err
+		}
 	}
 	count, limit := &c.ordinaryCalls, ordinaryCallLimit
 	if call.lifecycle {
@@ -73,15 +111,24 @@ func (c *Conn) queueCall(ctx context.Context, method string, params any) (*pendi
 	}
 	if *count >= limit {
 		c.mu.Unlock()
+		if call.stop != nil {
+			call.stop()
+		}
 		return nil, ErrAdmissionFull
 	}
 	credit, err := c.queue.reserveTerminal()
 	if err != nil {
 		c.mu.Unlock()
+		if call.stop != nil {
+			call.stop()
+		}
 		return nil, ErrAdmissionFull
 	}
 	*count++
 	call.credit = credit
+	if correlation {
+		c.correlations[call] = struct{}{}
+	}
 	c.mu.Unlock()
 	if method == subprocess.MethodInit {
 		if c.reverse == nil {
@@ -108,9 +155,14 @@ func (c *Conn) queueCall(ctx context.Context, method string, params any) (*pendi
 			}
 		}
 	}
-	params, ctx, end, err := prepareForwardCall(ctx, method, params)
-	call.ctx, call.end = ctx, end
-	if err == nil {
+	if correlation {
+		params, call.sendDeadline, err = prepareCorrelationParams(params, started)
+	} else {
+		var end context.CancelFunc
+		params, ctx, end, err = prepareForwardCall(ctx, method, params)
+		call.ctx, call.end = ctx, end
+	}
+	if err == nil && !correlation {
 		params, err = c.prepareParent(call, params)
 		ctx = call.ctx
 	}
@@ -137,10 +189,18 @@ func (c *Conn) queueCall(ctx context.Context, method string, params any) (*pendi
 	c.mu.Lock()
 	if c.closedBy != nil {
 		err = c.closedBy
-	} else if err = ctx.Err(); err == nil {
-		call.frame, err = c.queue.enqueueOwned(lane, wire)
+	} else {
+		if correlation {
+			err = c.correlationReadyLocked(call)
+		}
 		if err == nil {
-			c.outbound[call.frame] = &outboundFrame{ctx: ctx, call: call, budget: budget, idSlot: slot}
+			err = ctx.Err()
+		}
+		if err == nil {
+			call.frame, err = c.queue.enqueueOwned(lane, wire)
+			if err == nil {
+				c.outbound[call.frame] = &outboundFrame{ctx: ctx, call: call, budget: budget, idSlot: slot}
+			}
 		}
 	}
 	c.mu.Unlock()
@@ -160,17 +220,33 @@ func (c *Conn) releaseCall(call *pendingCall) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	delete(c.correlations, call)
+	if call.stop != nil {
+		call.stop()
+	}
 	c.retireParentLocked(call)
 	delete(c.pending, call.id)
-	if call.frame != nil && c.queue.remove(call.frame) {
-		delete(c.outbound, call.frame)
+	if call.frame != nil {
+		removed := c.queue.remove(call.frame)
+		c.queue.mu.Lock()
+		active := c.queue.active == call.frame
+		c.queue.mu.Unlock()
+		// close discards queued frames. Only the actual active physical writer
+		// can still own this call's reserved cancellation credit afterward.
+		if removed || !active {
+			delete(c.outbound, call.frame)
+			call.frame = nil
+		}
 	}
 	if call.lifecycle {
 		c.lifecycleCalls--
 	} else {
 		c.ordinaryCalls--
 	}
-	call.credit.release()
+	call.released = true
+	if !call.correlation || call.frame == nil {
+		call.credit.release()
+	}
 }
 
 // cancelQueuedCall consumes reserved control capacity without waiting for an
@@ -179,20 +255,34 @@ func (c *Conn) releaseCall(call *pendingCall) {
 func (c *Conn) cancelQueuedCall(call *pendingCall, cause error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.cancelQueuedCallLocked(call, cause)
+}
+func (c *Conn) cancelQueuedCallLocked(call *pendingCall, cause error) {
 	c.retireParentLocked(call)
-	if len(call.reply) > 0 {
+	if len(call.reply) > 0 || (call.correlation && call.terminal) {
 		return
 	}
 	if c.queue.remove(call.frame) {
 		delete(c.outbound, call.frame)
+		call.frame = nil
 		return
 	}
 	if call.id == (subprocess.RPCID{}) || call.method == subprocess.MethodUnload || c.closedBy != nil {
 		return
 	}
+	if call.correlation && (call.publication.cancelReason != "" || call.publication.err != nil) {
+		return
+	}
+	if call.correlation && !call.publication.complete {
+		call.publication.cancelRequested = cause
+		return
+	}
 	reason := subprocess.CallerCancelled
 	if errors.Is(cause, context.DeadlineExceeded) {
 		reason = subprocess.DeadlineExpired
+	}
+	if call.correlation {
+		call.publication.cancelReason = reason
 	}
 	wire, err := json.Marshal(subprocess.RPCRequest{JSONRPC: "2.0", Method: "rpc/cancel", Params: subprocess.CancelParams{RequestOwner: subprocess.HostRPCOwnerHost, ID: call.id, Reason: reason}})
 	wire = append(wire, '\n')
@@ -205,7 +295,7 @@ func (c *Conn) cancelQueuedCall(call *pendingCall, cause error) {
 		c.droppedCancel.Add(1)
 		return
 	}
-	c.outbound[frame] = &outboundFrame{cancel: true, budget: -1, idSlot: -1}
+	c.outbound[frame] = &outboundFrame{cancel: true, budget: -1, idSlot: -1, cancelCall: call}
 	c.signalWriter()
 }
 
@@ -289,7 +379,11 @@ func (c *Conn) write() {
 			err = out.ctx.Err()
 		}
 		if err == nil && out.budget >= 0 {
-			remaining := time.Until(mustDeadline(out.ctx)).Milliseconds()
+			deadline := mustDeadline(out.ctx)
+			if out.call != nil && out.call.correlation {
+				deadline = out.call.sendDeadline
+			}
+			remaining := time.Until(deadline).Milliseconds()
 			if remaining <= 0 {
 				err = context.DeadlineExceeded
 			} else {
@@ -298,6 +392,11 @@ func (c *Conn) write() {
 					frame.wire[out.budget+i] = ' '
 				}
 				copy(frame.wire[out.budget:out.budget+10], strconv.FormatInt(remaining, 10))
+			}
+		}
+		if err == nil && out.call != nil {
+			if out.call.correlation {
+				err = c.correlationReadyLocked(out.call)
 			}
 		}
 		if err == nil && out.call != nil {
@@ -333,15 +432,29 @@ func (c *Conn) write() {
 		}
 		c.mu.Lock()
 		c.queue.complete(frame)
+		if out.call != nil && out.call.correlation {
+			out.call.publication.err = err
+			if err == nil && out.call.publication.cancelRequested != nil {
+				c.cancelQueuedCallLocked(out.call, out.call.publication.cancelRequested)
+			}
+		}
 		if err != nil && out.call != nil {
 			c.retireParentLocked(out.call)
 		}
 		if out.receipt != nil {
 			out.receipt.finishLocked(c)
 		}
+		if out.cancelCall != nil && out.cancelCall.correlation {
+			if err != nil {
+				out.cancelCall.publication.cancelErr = err
+			}
+		}
 		c.activeReceipt = nil
 		if out.call != nil && out.call.frame == frame {
 			out.call.frame = nil
+			if out.call.correlation && out.call.released {
+				out.call.credit.release()
+			}
 		}
 		if out.receipt == nil && out.inboundID != (subprocess.RPCID{}) {
 			delete(c.inboundActive, out.inboundID)
@@ -371,6 +484,9 @@ func (c *Conn) writeFrame(wire []byte, out *outboundFrame) error {
 	if out.cancel {
 		deadline = time.Now().Add(min(cancelWriteTimeout, c.writeTimeout))
 	}
+	if out.call != nil && out.call.correlation && !out.call.sendDeadline.IsZero() && out.call.sendDeadline.Before(deadline) {
+		deadline = out.call.sendDeadline
+	}
 	c.mu.Lock()
 	closed := c.closedBy
 	c.mu.Unlock()
@@ -379,6 +495,11 @@ func (c *Conn) writeFrame(wire []byte, out *outboundFrame) error {
 			c.droppedCancel.Add(1)
 		}
 		return closed
+	}
+	if out.call != nil && out.call.correlation {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
 	d, canDeadline := c.w.(interface{ SetWriteDeadline(time.Time) error })
 	if canDeadline {
@@ -392,17 +513,67 @@ func (c *Conn) writeFrame(wire []byte, out *outboundFrame) error {
 	var timer *time.Timer
 	if !canDeadline {
 		if closer, ok := c.w.(io.Closer); ok {
+			timerDone := make(chan struct{})
 			timer = time.AfterFunc(max(time.Until(deadline), 0), func() {
-				c.fail(fmt.Errorf("%w: write deadline: %w", ErrGone, context.DeadlineExceeded))
+				defer close(timerDone)
+				c.mu.Lock()
+				if out.call != nil && out.call.correlation && out.call.publication.complete {
+					c.mu.Unlock()
+					return
+				}
+				c.failLocked(fmt.Errorf("%w: write deadline: %w", ErrGone, context.DeadlineExceeded))
+				c.mu.Unlock()
 				_ = closer.Close()
 			})
-			defer timer.Stop()
+			defer func() {
+				if !timer.Stop() {
+					<-timerDone
+				}
+			}()
 		} else if out.cancel {
 			c.droppedCancel.Add(1)
 			return nil
+		} else if out.call != nil && out.call.correlation {
+			return fmt.Errorf("%w: correlation writer cannot bound physical publication", ErrGone)
 		}
 	}
+	// Cancellation interrupts only an incomplete correlation frame. A completed
+	// physical receipt makes observer cancellation a separate control operation.
+	if out.call != nil && out.call.correlation {
+		interrupted := make(chan struct{})
+		stop := context.AfterFunc(ctx, func() {
+			defer close(interrupted)
+			c.mu.Lock()
+			complete := out.call.publication.complete
+			c.mu.Unlock()
+			if complete {
+				return
+			}
+			if canDeadline {
+				_ = d.SetWriteDeadline(time.Now())
+			} else if closer, ok := c.w.(io.Closer); ok {
+				_ = closer.Close()
+			}
+		})
+		defer func() {
+			if !stop() {
+				<-interrupted
+			}
+		}()
+	}
 	n, err := c.w.Write(wire)
+	if out.cancelCall != nil && out.cancelCall.correlation {
+		c.mu.Lock()
+		out.cancelCall.publication.cancelErr = err
+		out.cancelCall.publication.cancelComplete = err == nil && n == len(wire)
+		c.mu.Unlock()
+	}
+	if out.call != nil && out.call.correlation {
+		c.mu.Lock()
+		out.call.publication.bytes = n
+		out.call.publication.complete = err == nil && n == len(wire)
+		c.mu.Unlock()
+	}
 	if err == nil && n == len(wire) {
 		return nil
 	}
@@ -414,6 +585,15 @@ func (c *Conn) writeFrame(wire []byte, out *outboundFrame) error {
 	}
 	if err == nil {
 		err = io.ErrShortWrite
+	}
+	if out.call != nil && out.call.correlation && n == 0 {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !time.Now().Before(deadline) {
+			return context.DeadlineExceeded
+		}
+		return fmt.Errorf("%w: zero-byte write: %w", ErrGone, err)
 	}
 	wrapped := fmt.Errorf("%w: write: %w", ErrGone, err)
 	c.fail(wrapped)

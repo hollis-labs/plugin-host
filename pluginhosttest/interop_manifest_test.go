@@ -176,7 +176,7 @@ func inventoryInterop(source fs.FS) (interopManifest, []interopCase, error) {
 		}
 		if recipe.Scenario == "deadline" {
 			item.Owner = "orch-pp0 host/protocol contract owners"
-			item.Reason = "FULL arrival-deadline-and-absent-context source-available, host-unsupported, PENDING/incompatible: finite parent required, local and wire budgets coupled"
+			item.Reason = "FULL arrival-deadline-and-absent-context requires actual OptionB public Conn receipts; this inventory executes nothing and cannot claim a pass"
 		}
 		if recipe.Status == "proposed" {
 			item.Status, item.Owner, item.Reason = "unavailable", recipe.Owner, recipe.Reason

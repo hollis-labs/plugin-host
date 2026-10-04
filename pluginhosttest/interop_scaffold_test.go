@@ -118,7 +118,7 @@ func TestSDKInteropScaffold(t *testing.T) {
 		BuildReceipt    string           `json:"go_child_build_receipt"`
 		Runtimes        []interopRuntime `json:"runtimes"`
 		Cases           []interopCase    `json:"cases"`
-	}{"FULL arrival-deadline-and-absent-context source-available, host-unsupported, PENDING/incompatible on host60d0b318; finite-parent subset only, no full0189/0172 conformance", "scaffold-only-no-replay", interopSDKSourceCommit, interopSDKBaseCommit, os.Getenv("INTEROP_HOST_COMMIT"), os.Getenv("INTEROP_HOST_DIRTY") == "true", manifest.CorpusVersion, hex.EncodeToString(digest[:]), manifest.Coverage, strings.TrimSpace(string(receipt)), runtimes, observations}
+	}{"Inventory only: no replay acceptance; historical finite-parent receipts separate from actual OptionB executions and remaining mandatory0189/0172/0163 evidence", "scaffold-only-no-replay", interopSDKSourceCommit, interopSDKBaseCommit, os.Getenv("INTEROP_HOST_COMMIT"), os.Getenv("INTEROP_HOST_DIRTY") == "true", manifest.CorpusVersion, hex.EncodeToString(digest[:]), manifest.Coverage, strings.TrimSpace(string(receipt)), runtimes, observations}
 	if report.HostCommit == "" {
 		t.Fatal("host commit is required")
 	}
