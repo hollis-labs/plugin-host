@@ -11,10 +11,14 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Fixed
 
-- Truncated stderr tails discard their possibly partial leading line before
-  secret and host-pattern redaction. Exact full windows that never truncated
-  retain their first line. A window without a newline, or with only a trailing
-  newline, remains intact within the byte cap; an over-long single line cannot recover a truncated key name.
+- Truncated stderr tails discard their possibly partial leading line only when
+  non-blank text remains after the first LF, before secret and host redaction.
+  Re-apply this rule after a final byte trim if secret redaction grows the text.
+  Exact full windows that never truncated retain their first line unless that
+  final trim is needed. Windows without an LF followed by non-blank text stay
+  intact within the cap; partial key names can remain. CR-only separators are
+  not line boundaries, and exact-boundary cuts may drop a complete leading line.
+  Plugins must not log credentials.
 
 ### Added
 

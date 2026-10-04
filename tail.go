@@ -25,11 +25,14 @@ const defaultTailBytes = 8192
 // dropping the rest. Redaction happens in String, not Write, so a secret
 // split across a write boundary is still caught once its full text has
 // landed in the retained window; Redact separately handles a secret's
-// fragment truncated off either edge of that window. After the window has
-// truncated, String drops the possibly partial leading line when a newline
-// remains, before any redaction. A single over-long line with no newline is
-// retained whole within the byte cap, as is a line whose only newline is
-// trailing; pattern redaction cannot recover a lost key name in that case. Plugins must avoid logging credentials.
+// fragment truncated off either edge of that window. After truncation, String
+// drops the possibly partial leading line only when non-blank text remains
+// after its first LF. The same rule is applied after a final byte trim when
+// secret redaction expands the output. This happens before host redaction.
+// Windows without such an LF remain whole within the byte cap, including a
+// trailing LF or blank suffix; a partial key can remain in these windows.
+// CR-only separators are not line boundaries. A cut exactly at a line boundary
+// may conservatively drop one complete line. Plugins must not log credentials.
 //
 // The zero value is ready to use, with defaultTailBytes as its retained
 // window and no redaction.
@@ -81,15 +84,21 @@ func (t *Tail) String() string {
 	// A truncated window can start inside a credential name, defeating
 	// host pattern redaction. Remove its possibly partial leading line first.
 	if t.truncated {
-		if end := strings.IndexByte(raw, '\n'); end >= 0 && end+1 < len(raw) {
-			raw = raw[end+1:]
-		}
+		raw = dropPartialTailLine(raw)
 	}
 	s := Redact(raw, t.Secrets)
 	if limit := t.limit(); len(s) > limit {
-		s = s[len(s)-limit:]
+		s = dropPartialTailLine(s[len(s)-limit:])
 	}
 	return s
+}
+
+// A blank suffix is not a useful replacement for the retained diagnostic.
+func dropPartialTailLine(raw string) string {
+	if end := strings.IndexByte(raw, '\n'); end >= 0 && strings.TrimSpace(raw[end+1:]) != "" {
+		return raw[end+1:]
+	}
+	return raw
 }
 
 type redactionRange struct {
