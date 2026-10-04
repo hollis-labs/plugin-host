@@ -28,8 +28,8 @@ const defaultTailBytes = 8192
 // fragment truncated off either edge of that window. After the window has
 // truncated, String drops the possibly partial leading line when a newline
 // remains, before any redaction. A single over-long line with no newline is
-// retained whole within the byte cap; pattern redaction cannot recover a lost
-// key name in that case. Plugins must avoid logging credentials.
+// retained whole within the byte cap, as is a line whose only newline is
+// trailing; pattern redaction cannot recover a lost key name in that case. Plugins must avoid logging credentials.
 //
 // The zero value is ready to use, with defaultTailBytes as its retained
 // window and no redaction.
@@ -81,7 +81,7 @@ func (t *Tail) String() string {
 	// A truncated window can start inside a credential name, defeating
 	// host pattern redaction. Remove its possibly partial leading line first.
 	if t.truncated {
-		if end := strings.IndexByte(raw, '\n'); end >= 0 {
+		if end := strings.IndexByte(raw, '\n'); end >= 0 && end+1 < len(raw) {
 			raw = raw[end+1:]
 		}
 	}

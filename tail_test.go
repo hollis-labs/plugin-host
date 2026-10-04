@@ -100,3 +100,20 @@ func TestExactlyFullTailKeepsCompleteLeadingLine(t *testing.T) {
 		t.Fatal("untruncated full window lost first line", got)
 	}
 }
+
+func TestTruncatedLongLineWithTrailingNewlineIsRetained(t *testing.T) {
+	tail := &Tail{Bytes: 32}
+	text := strings.Repeat("x", 5000) + "\n"
+	_, _ = tail.Write([]byte(text))
+	if got := tail.String(); got != strings.Repeat("x", 31)+"\n" {
+		t.Fatalf("terminal newline erased single-line diagnostic: %q", got)
+	}
+}
+
+func TestTruncatedLongLineKeepsPartialSecondLine(t *testing.T) {
+	tail := &Tail{Bytes: 32}
+	_, _ = tail.Write([]byte(strings.Repeat("x", 5000) + "\nSECOND CAUSE: partial"))
+	if got := tail.String(); got != "SECOND CAUSE: partial" {
+		t.Fatalf("second-line diagnostic lost: %q", got)
+	}
+}

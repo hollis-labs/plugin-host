@@ -13,8 +13,8 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 - Truncated stderr tails discard their possibly partial leading line before
   secret and host-pattern redaction. Exact full windows that never truncated
-  retain their first line. A window without a newline remains intact within
-  the byte cap; an over-long single line cannot recover a truncated key name.
+  retain their first line. A window without a newline, or with only a trailing
+  newline, remains intact within the byte cap; an over-long single line cannot recover a truncated key name.
 
 ### Added
 
