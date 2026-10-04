@@ -316,6 +316,8 @@ func (w *interopEventWriter) failure() error {
 }
 
 type interopControls struct {
+	privatePlan          *interopPrivatePlan
+	privateWrites        []interopWriteWitness
 	hostCancelEvidence   map[uint64]interopHostCancelEvidence
 	expandedReverseLimit uint32
 	socket               net.Conn
@@ -464,7 +466,15 @@ func (c *interopControls) finish(expectedCode int) error {
 			if exits != 1 || finished != 1 {
 				return fmt.Errorf("harness terminal receipts exits=%d finished=%d", exits, finished)
 			}
-			if err := interopWireTerminals(c.observed, expectedCode, c.hostCancelEvidence); err != nil {
+			wireEvents := c.observed
+			if c.privatePlan != nil {
+				var guardErr error
+				wireEvents, guardErr = c.privatePlan.guard(c.observed, c.privateWrites)
+				if guardErr != nil {
+					return guardErr
+				}
+			}
+			if err := interopWireTerminals(wireEvents, expectedCode, c.hostCancelEvidence); err != nil {
 				return err
 			}
 			if c.expandedReverseLimit != 0 {
