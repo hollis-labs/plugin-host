@@ -471,3 +471,144 @@ func TestCorrelationRemoteBudgetDoesNotCancelObserver(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCorrelationQueuedCloseRetiresUnpublishedCredit(t *testing.T) {
+	p := reverseReadyPeer(t, reverseTestSpec(t, HostServices{}))
+	gate := holdNextWrite(t, p.conn)
+	barrier := make(chan error, 1)
+	go func() { barrier <- p.conn.Notify("barrier", nil) }()
+	<-gate.started
+	observer, end := context.WithTimeout(context.Background(), time.Second)
+	defer end()
+	call, err := p.conn.queueCallClass(observer, subprocess.MethodHealth, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, callErr := p.conn.awaitCall(call); done <- callErr }()
+	p.conn.fail(io.EOF)
+	err = <-done
+	close(gate.release)
+	<-barrier
+	if !errors.Is(err, io.EOF) {
+		t.Fatal(err)
+	}
+	p.conn.mu.Lock()
+	p.conn.queue.mu.Lock()
+	reserved := p.conn.queue.reserved
+	p.conn.queue.mu.Unlock()
+	active := len(p.conn.correlations)
+	ordinary := p.conn.ordinaryCalls
+	id := call.id
+	bytes := call.publication.bytes
+	p.conn.mu.Unlock()
+	if reserved != 0 || active != 0 || ordinary != 0 || id != (subprocess.RPCID{}) || bytes != 0 {
+		t.Fatalf("queued close did not retire effect-free reservation: reserved=%d correlations=%d ordinary=%d id=%v physical_bytes=%d", reserved, active, ordinary, id, bytes)
+	}
+}
+
+func TestCorrelationCloseRetainsCreditUntilActiveWriteReturns(t *testing.T) {
+	p := reverseReadyPeer(t, reverseTestSpec(t, HostServices{}))
+	until := time.Now().Add(time.Second)
+	for {
+		p.conn.queue.mu.Lock()
+		idle := p.conn.queue.active == nil
+		p.conn.queue.mu.Unlock()
+		if idle {
+			break
+		}
+		if time.Now().After(until) {
+			t.Fatal("handshake writer active")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	w := &correlationDelayedReceiptWriter{Writer: p.conn.w, started: make(chan struct{}), release: make(chan struct{})}
+	p.conn.w = w
+	t.Cleanup(func() {
+		select {
+		case <-w.release:
+		default:
+			close(w.release)
+		}
+	})
+	observer, end := context.WithTimeout(context.Background(), time.Second)
+	defer end()
+	call, err := p.conn.queueCallClass(observer, subprocess.MethodHealth, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, callErr := p.conn.awaitCall(call); done <- callErr }()
+	request := p.request()
+	<-w.started
+	p.conn.fail(io.EOF)
+	end() // Exercise cancellation concurrently with irreversible close.
+	if err := <-done; !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	p.conn.queue.mu.Lock()
+	held := p.conn.queue.reserved
+	active := p.conn.queue.active == call.frame
+	p.conn.queue.mu.Unlock()
+	if held != 1 || !active {
+		t.Fatal("close stole physical writer credit", held, active)
+	}
+	close(w.release)
+	until = time.Now().Add(time.Second)
+	for {
+		p.conn.mu.Lock()
+		p.conn.queue.mu.Lock()
+		reserved := p.conn.queue.reserved
+		settled := p.conn.queue.active == nil
+		p.conn.queue.mu.Unlock()
+		complete, bytes, id := call.publication.complete, call.publication.bytes, call.id
+		p.conn.mu.Unlock()
+		if settled {
+			if reserved != 0 || !complete || bytes == 0 || id != request.ID {
+				t.Fatal("active close receipt/credit", reserved, complete, bytes, id)
+			}
+			break
+		}
+		if time.Now().After(until) {
+			t.Fatal("active physical writer not retired")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestCorrelationQueuedReaderEOFRetiresUnpublishedCredit(t *testing.T) {
+	p := reverseReadyPeer(t, reverseTestSpec(t, HostServices{}))
+	gate := holdNextWrite(t, p.conn)
+	barrier := make(chan error, 1)
+	go func() { barrier <- p.conn.Notify("barrier", nil) }()
+	<-gate.started
+	observer, end := context.WithTimeout(context.Background(), time.Second)
+	defer end()
+	call, err := p.conn.queueCallClass(observer, subprocess.MethodHealth, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, callErr := p.conn.awaitCall(call); done <- callErr }()
+	if closeErr := p.toConn.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	err = <-done
+	close(gate.release)
+	<-barrier
+	if !errors.Is(err, ErrGone) {
+		t.Fatal(err)
+	}
+	p.conn.mu.Lock()
+	p.conn.queue.mu.Lock()
+	reserved := p.conn.queue.reserved
+	p.conn.queue.mu.Unlock()
+	active := len(p.conn.correlations)
+	ordinary := p.conn.ordinaryCalls
+	id := call.id
+	bytes := call.publication.bytes
+	p.conn.mu.Unlock()
+	if reserved != 0 || active != 0 || ordinary != 0 || id != (subprocess.RPCID{}) || bytes != 0 {
+		t.Fatalf("queued close did not retire effect-free reservation: reserved=%d correlations=%d ordinary=%d id=%v physical_bytes=%d", reserved, active, ordinary, id, bytes)
+	}
+}

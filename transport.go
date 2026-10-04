@@ -226,9 +226,17 @@ func (c *Conn) releaseCall(call *pendingCall) {
 	}
 	c.retireParentLocked(call)
 	delete(c.pending, call.id)
-	if call.frame != nil && c.queue.remove(call.frame) {
-		delete(c.outbound, call.frame)
-		call.frame = nil
+	if call.frame != nil {
+		removed := c.queue.remove(call.frame)
+		c.queue.mu.Lock()
+		active := c.queue.active == call.frame
+		c.queue.mu.Unlock()
+		// close discards queued frames. Only the actual active physical writer
+		// can still own this call's reserved cancellation credit afterward.
+		if removed || !active {
+			delete(c.outbound, call.frame)
+			call.frame = nil
+		}
 	}
 	if call.lifecycle {
 		c.lifecycleCalls--
