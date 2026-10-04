@@ -63,8 +63,8 @@ func interopRuntimeVersion(name string) interopRuntime {
 // This opt-in inventories obligations and a compiled child. It deliberately
 // runs no SDK fake host and makes no claim about real host interoperability.
 func TestSDKInteropScaffold(t *testing.T) {
-	source, child, reportPath := os.Getenv("INTEROP_SDK_SOURCE"), os.Getenv("INTEROP_GO_CHILD"), os.Getenv("INTEROP_REPORT")
-	if source == "" && child == "" && reportPath == "" {
+	source, child, reportPath := os.Getenv("INTEROP_SDK_SOURCE"), os.Getenv("INTEROP_GO_CHILD"), os.Getenv("INTEROP_INVENTORY_REPORT")
+	if reportPath == "" {
 		t.Skip("opt in with scripts/interop-scaffold.sh")
 	}
 	if source == "" || child == "" || reportPath == "" {
@@ -106,18 +106,19 @@ func TestSDKInteropScaffold(t *testing.T) {
 	}
 	digest := sha256.Sum256(rawManifest)
 	report := struct {
-		Mode         string           `json:"mode"`
-		SDKCommit    string           `json:"sdk_commit"`
-		SDKBase      string           `json:"sdk_base_commit"`
-		HostCommit   string           `json:"host_commit"`
-		HostDirty    bool             `json:"host_dirty"`
-		Corpus       int              `json:"corpus_version"`
-		ManifestHash string           `json:"manifest_sha256"`
-		Coverage     string           `json:"sdk_coverage"`
-		BuildReceipt string           `json:"go_child_build_receipt"`
-		Runtimes     []interopRuntime `json:"runtimes"`
-		Cases        []interopCase    `json:"cases"`
-	}{"scaffold-only-no-replay", interopSDKSourceCommit, interopSDKBaseCommit, os.Getenv("INTEROP_HOST_COMMIT"), os.Getenv("INTEROP_HOST_DIRTY") == "true", manifest.CorpusVersion, hex.EncodeToString(digest[:]), manifest.Coverage, strings.TrimSpace(string(receipt)), runtimes, observations}
+		NamedLimitation string           `json:"named_limitation"`
+		Mode            string           `json:"mode"`
+		SDKCommit       string           `json:"sdk_commit"`
+		SDKBase         string           `json:"sdk_base_commit"`
+		HostCommit      string           `json:"host_commit"`
+		HostDirty       bool             `json:"host_dirty"`
+		Corpus          int              `json:"corpus_version"`
+		ManifestHash    string           `json:"manifest_sha256"`
+		Coverage        string           `json:"sdk_coverage"`
+		BuildReceipt    string           `json:"go_child_build_receipt"`
+		Runtimes        []interopRuntime `json:"runtimes"`
+		Cases           []interopCase    `json:"cases"`
+	}{"FULL arrival-deadline-and-absent-context source-available, host-unsupported, PENDING/incompatible on host60d0b318; finite-parent subset only, no full0189/0172 conformance", "scaffold-only-no-replay", interopSDKSourceCommit, interopSDKBaseCommit, os.Getenv("INTEROP_HOST_COMMIT"), os.Getenv("INTEROP_HOST_DIRTY") == "true", manifest.CorpusVersion, hex.EncodeToString(digest[:]), manifest.Coverage, strings.TrimSpace(string(receipt)), runtimes, observations}
 	if report.HostCommit == "" {
 		t.Fatal("host commit is required")
 	}

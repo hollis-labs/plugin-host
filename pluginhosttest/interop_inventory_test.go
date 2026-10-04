@@ -70,3 +70,43 @@ func TestInteropInventoryRejectsUnownedProposalAndMissingRecipe(t *testing.T) {
 		}
 	}
 }
+
+func TestInteropInventoryUsesAuthoredSelectionAndRetainsUnknownGroups(t *testing.T) {
+	fixture := interopInventoryFixture(`{
+  "corpus_version":1,"duplex_source":"custom-duplex.json",
+  "expanded":[
+   {"name":"invented-operation","scenario":"future","profile":"custom","level":"normative"},
+   {"name":"excluded-proposal","scenario":"base-cancel","status":"proposed","owner":"fixture-owner","reason":"needs seam","level":"normative"},
+   {"name":"owned-proposal","status":"proposed","owner":"protocol-owner","reason":"needs contract","level":"normative"}
+  ],
+  "expanded_selection":{"version":1,"kind":"source-group","source_group":"expanded","modes":{"internal-test-only":{"exclude_scenarios":[]},"normal-serve-negotiated":{"exclude_scenarios":["base-cancel"]}}},
+  "negotiated":{"mode":"normal-serve-negotiated","matrix":"custom-negotiation.json","expanded_selection":"normal-serve-negotiated"},
+  "unknown_group":{"future":true}
+ }`)
+	_, cases, err := inventoryInterop(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := map[string]interopCase{}
+	unknown := false
+	for _, row := range cases {
+		if row.Family == "negotiated-expanded" {
+			selected[row.Name] = row
+		}
+		if row.Family == "unsupported-manifest-field" && row.Name == "unknown_group" {
+			unknown = row.Status == "pending" && row.Owner != ""
+		}
+	}
+	if _, ok := selected["invented-operation"]; !ok {
+		t.Fatal("adapter imposed a case-name allowlist")
+	}
+	if _, ok := selected["excluded-proposal"]; ok {
+		t.Fatal("proposed row escaped scenario exclusion")
+	}
+	if p := selected["owned-proposal"]; p.Status != "unavailable" || p.Owner != "protocol-owner" || p.Reason != "needs contract" {
+		t.Fatal("authored proposed ownership lost", p)
+	}
+	if !unknown {
+		t.Fatal("unknown future group silently dropped")
+	}
+}

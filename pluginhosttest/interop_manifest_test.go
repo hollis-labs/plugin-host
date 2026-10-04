@@ -8,10 +8,12 @@ import (
 	"path"
 	"sort"
 	"strings"
+
+	"github.com/hollis-labs/plugin-host/internal/interopfixture"
 )
 
-const interopSDKSourceCommit = "90adf1f02ddffde708fa3784f0063bab5171462b"
-const interopAdapterOwner = "plugin-host interop adapter (CW-20261003-0189 slice 5; PR 8 and slices 2–3)"
+const interopSDKSourceCommit = "ea8ec0dca862d0c7284cc6a130a4b27fb812ed21"
+const interopAdapterOwner = "plugin-host interop adapter (CW-20261003-0189 slice 5)"
 const interopFixtureLimit = 8 << 20
 
 // Recipes retain their authored steps and expected values. The host runner must
@@ -44,6 +46,7 @@ type interopManifest struct {
 		Matrix            string   `json:"matrix"`
 		Recipes           []string `json:"recipes"`
 		ExpandedScenarios string   `json:"expanded_scenarios"`
+		ExpandedSelection string   `json:"expanded_selection"`
 		Unavailable       []struct {
 			Feature string `json:"feature"`
 			Owner   string `json:"owner"`
@@ -145,6 +148,13 @@ func inventoryInterop(source fs.FS) (interopManifest, []interopCase, error) {
 	if err := json.Unmarshal(rawManifest, &manifest); err != nil {
 		return manifest, nil, err
 	}
+	var selectorFields map[string]json.RawMessage
+	if err := json.Unmarshal(rawManifest, &selectorFields); err != nil {
+		return manifest, nil, err
+	}
+	if _, authored := selectorFields["expanded_selection"]; authored && (manifest.Negotiated == nil || manifest.Negotiated.ExpandedSelection == "") {
+		return manifest, nil, fmt.Errorf("authored selector missing negotiated linkage")
+	}
 	if manifest.CorpusVersion != 1 {
 		return manifest, nil, fmt.Errorf("unsupported corpus version %d", manifest.CorpusVersion)
 	}
@@ -160,9 +170,13 @@ func inventoryInterop(source fs.FS) (interopManifest, []interopCase, error) {
 			return fmt.Errorf("missing or duplicate corpus case %q", key)
 		}
 		seen[key] = true
-		item := interopCase{Name: name, Family: family, Profile: recipe.Profile, Level: recipe.Level, Status: "pending", Owner: interopAdapterOwner, Reason: "Host replay handler not implemented; Conn/Lifecycle integration is gated", Recipe: recipe}
+		item := interopCase{Name: name, Family: family, Profile: recipe.Profile, Level: recipe.Level, Status: "pending", Owner: interopAdapterOwner, Reason: "Host replay handler not implemented in this inventory; actual execution receipts are separate", Recipe: recipe}
 		if family == "duplex" || family == "expanded" {
 			item.Mode = "internal-test-only"
+		}
+		if recipe.Scenario == "deadline" {
+			item.Owner = "orch-pp0 host/protocol contract owners"
+			item.Reason = "FULL arrival-deadline-and-absent-context source-available, host-unsupported, PENDING/incompatible: finite parent required, local and wire budgets coupled"
 		}
 		if recipe.Status == "proposed" {
 			item.Status, item.Owner, item.Reason = "unavailable", recipe.Owner, recipe.Reason
@@ -275,7 +289,22 @@ func inventoryInterop(source fs.FS) (interopManifest, []interopCase, error) {
 		}
 		// This is an authored prose selection rather than a machine-readable list.
 		// Preserve it as an unsupported selection instead of inventing case filters.
-		if negotiated.ExpandedScenarios != "" {
+		if negotiated.ExpandedSelection != "" {
+			selected, err := interopfixture.Select(rawManifest, negotiated.ExpandedSelection, nil)
+			if err != nil {
+				return manifest, nil, err
+			}
+			for _, raw := range selected {
+				recipe, err := decodeInteropRecipe(raw, false)
+				if err != nil {
+					return manifest, nil, err
+				}
+				if err := add("negotiated-expanded", recipe.Name, recipe, false); err != nil {
+					return manifest, nil, err
+				}
+				cases[len(cases)-1].Mode = negotiated.ExpandedSelection
+			}
+		} else if negotiated.ExpandedScenarios != "" {
 			if err := add("negotiated-selection", negotiated.ExpandedScenarios, interopRecipe{Level: "normative"}, false); err != nil {
 				return manifest, nil, err
 			}
@@ -296,7 +325,7 @@ func inventoryInterop(source fs.FS) (interopManifest, []interopCase, error) {
 	if err := json.Unmarshal(rawManifest, &fields); err != nil {
 		return manifest, nil, err
 	}
-	for _, known := range []string{"corpus_version", "coverage", "base_profiles", "duplex_source", "duplex_runtime_cases", "lifecycle", "expanded", "pending_coverage", "negotiated"} {
+	for _, known := range []string{"corpus_version", "coverage", "base_profiles", "duplex_source", "duplex_runtime_cases", "lifecycle", "expanded", "expanded_selection", "pending_coverage", "negotiated"} {
 		delete(fields, known)
 	}
 	for field, raw := range fields {
