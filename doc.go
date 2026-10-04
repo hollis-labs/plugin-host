@@ -19,6 +19,10 @@
 // ownership, enable/disable/reload and context-aware scope disposal callbacks.
 // It owns one classified retry loop over processes, never a nested Supervisor.
 //
+// [HostServiceRuntime] supplies a dormant closed typed host-service seam and
+// connection-bound leases. It does not enable reverse negotiation or attach to
+// Conn; see host-services.md for the next-slice integration requirements.
+//
 // # What the host still decides
 //
 // Trust, capability grants, secrets, manifests and where plugins come from

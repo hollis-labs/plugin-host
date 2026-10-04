@@ -35,6 +35,12 @@ refuses a tag whose CHANGELOG has no heading for it.
   Tails apply secret and host redaction and remain bounded after host redaction.
   Status summaries surface restart exhaustion and exit code/signal. Document
   host responsibility for children orphaned after host death without unload.
+
+- Add a dormant typed host-service seam, authenticated bounded binding ledger,
+  narrow renewal, shared execution budgets and cancellation/fencing. Reverse
+  offers remain refused; negotiated transport/lifecycle hookup and child replay
+  are subsequent gates (CW-20261003-0189 slice 3).
+
 - Publication-ordered positive JS-safe IDs, strict direction-aware reply
   demultiplexing and pending-method result validation. Pending correlation is
   registered before the first byte; canceled unselected calls consume no ID.
