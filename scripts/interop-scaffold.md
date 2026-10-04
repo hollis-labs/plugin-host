@@ -74,6 +74,33 @@ unchanged finite lifecycle policy. Other mandatory queue/fairness/control and
 full0189/0172 acceptance, unqualified profile claim, release or live activation
 from raw-case repair or these isolated receipts.
 
+**Private actual-Conn fairness witness:** the selected authored
+`host-writer-four-frame-fairness` scenario uses a stream decorator installed
+before Conn starts. The first ordinary frame blocks while nine actual Health
+calls and eight genuine reverse replies contend in the real bounded lanes.
+Each whole control write admits the next pre-owned refill intent, with at most
+31 unknown-target `rpc/cancel` refills. The source's `>=32` control writes and
+four-frame burst bound remain the assertions; 39 is the finite intent ceiling.
+No standalone SDK FrameWriter trace or queue admission is publication proof.
+
+The per-run identity fixes the exact manifest/corpus/selector, selected recipe,
+runtime and unique run UUID before launch. Metadata, snapshots and physical
+receipts are bounded. Control admission uses actual Conn capacity and owns no
+invented parent or terminal credit. Underlying byte count/error, subsequent ACK
+error, actual writer completion and genuine reverse retirement are distinct.
+Full bytes followed by a failed ACK remain full physical publication with
+uncertain outcome and harness failure. EOF accepts the authored unknown controls
+only through their complete pre-owned receipts. This selected fairness scenario
+authors no additional host cancellation: even a live or completed published
+target cannot authorize a control without its per-run intent and physical
+receipt. Other scenarios keep their caller/observer/descendant cancellation
+guards. Snapshot `HighWater` describes the base/refusal stream, not the
+negotiated reverse stream. Other notifications, leftovers and observer/control
+failures retain the strict guards. Natural
+worker/bridge cleanup and reap remain required. This test-only seam expands no
+public API or lifecycle policy; raw forward/credits and the original remaining
+mandatory ledger stay open.
+
 Reports and run logs stay in `TMPDIR/plugin-host-interop-<source>/`:
 `report.json` (inventory), `control-report.json`, `replay-report.json`, and
 `received-budget-report.json`. SDK draft merge/tag/release, broader adoption,

@@ -541,11 +541,14 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 				observations = append(observations, observation)
 				continue
 			}
-			supported := recipe.Scenario == "reverse" || recipe.Scenario == "effects" || recipe.Scenario == "unknown" || recipe.Scenario == "overflow" || recipe.Scenario == "cleanup-error" || recipe.Scenario == "cleanup-panic" || recipe.Scenario == "cleanup-hung" || recipe.Scenario == "receipt-restart" || recipe.Scenario == "descendants" || recipe.Scenario == "deadline"
+			supported := recipe.Scenario == "reverse" || recipe.Scenario == "effects" || recipe.Scenario == "unknown" || recipe.Scenario == "overflow" || recipe.Scenario == "cleanup-error" || recipe.Scenario == "cleanup-panic" || recipe.Scenario == "cleanup-hung" || recipe.Scenario == "receipt-restart" || recipe.Scenario == "descendants" || recipe.Scenario == "deadline" || recipe.Scenario == "host-fairness"
 			if !supported {
 				observation["status"] = "pending"
 				observation["owner"] = "plugin-host interop adapter (slice5)"
 				observation["reason"] = "Scenario handler pending; no execution claimed"
+				if recipe.Scenario == "forward" || recipe.Scenario == "credits" {
+					observation["reason"] = "Historical raw ea8 lifecycle/counter case PENDING/incompatible: actual finite Init+Load authority and cumulative startup counters preserved; no repeated/unbounded Load or counter projection"
+				}
 				observations = append(observations, observation)
 				continue
 			}
@@ -553,7 +556,13 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 			passed := t.Run(runtime+"/"+recipe.Name, func(t *testing.T) {
 				executed = true
 				b := &interopBackend{receipts: map[string]subprocess.StoragePutResult{}, inputs: map[string][32]byte{}}
-				p, c := startInteropExpanded(t, runtime, recipe, b)
+				var p *Process
+				var c *interopControls
+				if recipe.Scenario == "host-fairness" {
+					p, c = replayInteropPrivateHostFairness(t, runtime, recipe, b, observation)
+				} else {
+					p, c = startInteropExpanded(t, runtime, recipe, b)
+				}
 				switch recipe.Scenario {
 				case "deadline":
 					replayInteropRawDeadline(t, p, c, b, observation)
@@ -599,6 +608,10 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 				if recipe.Scenario == "deadline" {
 					auditInteropRawDeadline(t, c.observed)
 				}
+				if recipe.Scenario == "host-fairness" {
+					auditInteropPrivateEOF(t, c)
+					observation["private_eof_adverse_audit"] = true
+				}
 				observation["reaped"] = true
 				exit, _ := p.ExitInfo()
 				observation["exit_code"] = exit.Code
@@ -619,7 +632,7 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 				observation["worker_command_env"] = p.spec.Env
 				observation["bridge_command"] = p.spec.Command
 				observation["bridge_args"] = p.spec.Args
-				if recipe.Scenario != "deadline" {
+				if recipe.Scenario != "deadline" && recipe.Scenario != "host-fairness" {
 					observation["projection"] = "Actual Init+Load lifecycle and host-minted binding; command IDs follow lifecycle; authored expanded 10000ms method ceilings"
 				}
 				if recipe.Scenario == "cleanup-hung" {
