@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/hollis-labs/plugin-sdk/subprocess"
@@ -62,9 +63,8 @@ func (c *Client) Load(ctx context.Context) (subprocess.LoadResult, error) {
 	return Call[subprocess.LoadResult](ctx, c.conn, subprocess.MethodLoad, subprocess.LoadParams{})
 }
 
-// Unload sends plugin/unload. Over RPC it does not end the plugin's Serve
-// loop; only stdin EOF or SIGTERM does, and Serve then calls the plugin's
-// Unload again, so a plugin's Unload runs at least twice on a clean stop.
+// Unload sends terminal plugin/unload. The SDK cancels and drains admitted
+// callbacks, invokes cleanup once, flushes its terminal reply and exits.
 func (c *Client) Unload(ctx context.Context) error {
 	_, err := c.conn.Call(ctx, subprocess.MethodUnload, nil)
 	return err
@@ -74,7 +74,32 @@ func (c *Client) Unload(ctx context.Context) error {
 // HealthChecker answers {ok:true}, so "healthy" and "never implemented" are
 // indistinguishable here.
 func (c *Client) Health(ctx context.Context) (subprocess.HealthResult, error) {
-	return Call[subprocess.HealthResult](ctx, c.conn, subprocess.MethodHealth, nil)
+	raw, err := c.conn.Call(ctx, subprocess.MethodHealth, nil)
+	if err != nil {
+		return subprocess.HealthResult{}, healthError(err)
+	}
+	// Health has a closed result shape and a required boolean; absent/null ok
+	// must not silently decode into an authored unhealthy answer.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return subprocess.HealthResult{}, ErrProtocolMismatch
+	}
+	for key := range fields {
+		if key != "ok" && key != "message" {
+			return subprocess.HealthResult{}, ErrProtocolMismatch
+		}
+	}
+	if string(fields["ok"]) != "true" && string(fields["ok"]) != "false" {
+		return subprocess.HealthResult{}, ErrProtocolMismatch
+	}
+	if message, present := fields["message"]; present && string(message) == "null" {
+		return subprocess.HealthResult{}, ErrProtocolMismatch
+	}
+	var result subprocess.HealthResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return result, errors.Join(ErrProtocolMismatch, err)
+	}
+	return result, nil
 }
 
 // CommandExecute sends command/execute.

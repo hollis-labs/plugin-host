@@ -300,6 +300,10 @@ type toolResult struct {
 
 // callTool sends mcp/call_tool for a fixture tool and returns its content.
 func (e *env) callTool(ctx context.Context, inst Instance, tool string, args map[string]any) (json.RawMessage, error) {
+	// Protocol 2 requires an object even for tools with no arguments.
+	if args == nil {
+		args = map[string]any{}
+	}
 	var res toolResult
 	err := inst.Call(ctx, "mcp/call_tool", map[string]any{"tool_name": tool, "arguments": args}, &res)
 	return res.Content, err

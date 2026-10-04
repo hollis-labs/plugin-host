@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -31,8 +32,11 @@ type peer struct {
 
 func newPeer(t *testing.T, opts ...ConnOption) *peer {
 	t.Helper()
-	fromConnR, fromConnW := io.Pipe() // Conn -> peer
-	toConnR, toConnW := io.Pipe()     // peer -> Conn
+	fromConnR, fromConnW, err := os.Pipe() // Conn -> peer, deadline-capable writer
+	if err != nil {
+		t.Fatal(err)
+	}
+	toConnR, toConnW := io.Pipe() // peer -> Conn
 	p := &peer{t: t, reqs: make(chan subprocess.RPCRequest, 64), toConn: toConnW}
 	p.conn = NewConn(toConnR, fromConnW, opts...)
 	go func() {
@@ -53,7 +57,7 @@ func newPeer(t *testing.T, opts ...ConnOption) *peer {
 	return p
 }
 
-func (p *peer) request() subprocess.RPCRequest {
+func (p *peer) frame() subprocess.RPCRequest {
 	p.t.Helper()
 	select {
 	case r := <-p.reqs:
@@ -64,17 +68,27 @@ func (p *peer) request() subprocess.RPCRequest {
 	}
 }
 
+func (p *peer) request() subprocess.RPCRequest {
+	p.t.Helper()
+	for {
+		r := p.frame()
+		if r.Method != "rpc/cancel" {
+			return r
+		}
+	}
+}
+
 func (p *peer) raw(line string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	_, _ = io.WriteString(p.toConn, line+"\n")
 }
 
-func (p *peer) reply(id int64, result string) {
+func (p *peer) reply(id subprocess.RPCID, result string) {
 	p.raw(`{"jsonrpc":"2.0","id":` + itoa(id) + `,"result":` + result + `}`)
 }
 
-func itoa(n int64) string {
+func itoa(n subprocess.RPCID) string {
 	b, _ := json.Marshal(n)
 	return string(b)
 }
@@ -110,8 +124,8 @@ func TestConnIDsStartAtOneAndRepliesMayArriveOutOfOrder(t *testing.T) {
 	r1 := p.request()
 	fast := callAsync(context.Background(), p.conn, "fast")
 	r2 := p.request()
-	if r1.ID != 1 || r2.ID != 2 {
-		t.Fatalf("ids = %d, %d; want 1, 2", r1.ID, r2.ID)
+	if r1.ID != subprocess.NumberID(1) || r2.ID != subprocess.NumberID(2) {
+		t.Fatalf("ids = %v, %v; want 1, 2", r1.ID, r2.ID)
 	}
 	p.reply(r2.ID, `"fast-result"`)
 	if got := await(t, fast); got.err != nil || string(got.raw) != `"fast-result"` {
@@ -279,9 +293,9 @@ func TestConnRefusesAnOversizedRequestAndWritesNothing(t *testing.T) {
 	if r.Method != "small" {
 		t.Fatalf("first frame the peer saw was %q; the oversized one was written", r.Method)
 	}
-	if r.ID != 2 {
+	if r.ID != subprocess.NumberID(2) {
 		// The refused call consumed id 1; ids stay monotonic and unique.
-		t.Fatalf("id = %d, want 2", r.ID)
+		t.Fatalf("id = %v, want 2", r.ID)
 	}
 	p.reply(r.ID, `1`)
 	if got := await(t, ch); got.err != nil {
@@ -295,13 +309,13 @@ func TestConnNotifyIsIDless(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := p.request()
-	if r.ID != 0 || r.Method != "event/handle" {
+	if r.ID != (subprocess.RPCID{}) || r.Method != "event/handle" {
 		t.Fatalf("request = %+v; a notification carries no id", r)
 	}
 	// A following call still gets id 1: notifications do not spend ids.
 	ch := callAsync(context.Background(), p.conn, "x")
-	if r := p.request(); r.ID != 1 {
-		t.Fatalf("id = %d, want 1", r.ID)
+	if r := p.request(); r.ID != subprocess.NumberID(1) {
+		t.Fatalf("id = %v, want 1", r.ID)
 	}
 	_ = ch
 }
@@ -460,8 +474,19 @@ func TestLifecycleCallsDoNotEncodeNullParams(t *testing.T) {
 	}
 	for range 3 {
 		fields := <-requests
-		if params, exists := fields["params"]; exists && string(params) != "{}" {
-			t.Fatalf("lifecycle method %s sent params %s", fields["method"], params)
+		if params, exists := fields["params"]; exists {
+			var object map[string]json.RawMessage
+			if err := json.Unmarshal(params, &object); err != nil || object == nil || len(object) > 1 {
+				t.Fatalf("lifecycle method %s sent invalid params %s", fields["method"], params)
+			}
+			if raw, ok := object["context"]; ok {
+				var metadata subprocess.ForwardContext
+				if err := json.Unmarshal(raw, &metadata); err != nil || metadata.TimeoutMS == 0 {
+					t.Fatalf("invalid lifecycle budget: %s", raw)
+				}
+			} else if len(object) != 0 {
+				t.Fatalf("unknown lifecycle params: %s", params)
+			}
 		}
 	}
 }

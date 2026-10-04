@@ -54,7 +54,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer func() {
-		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		stopCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 		defer cancel()
 		_ = p.Stop(stopCtx)
 	}()
@@ -72,9 +72,51 @@ func main() {
 
 `Start` spawns the process, runs `plugin/init` then `plugin/load`, and returns a `*Process`. `Spawn` validates the complete SDK Init payload before starting a child, leaving the handshake to the host. Required directories, host version and incarnation must be provided. Zero protocol/contract default to 2/1, config defaults to `{}`, and nil grants encode as `[]`. `Supervise` requires an `InitFactory` for restarts and wraps a `Spec` to restart explicitly classified transient exits through a full handshake with backoff. `Lifecycle` adds staged planning, generation-owned enable/disable/reload and cleanup callbacks; see [the lifecycle contract](docs/lifecycle.md). `guard.Guarded` runs an in-process plugin call under a panic and budget guard.
 
+Calls to SDK forward methods carry `context.timeout_ms` from the remaining local
+call budget. An existing shorter DTO budget narrows the call; writer wait consumes
+it. `WithForwardBinding` carries a host-issued reference without creating authority.
+With no deadline and a disabled connection default, no wire deadline is invented.
+Caller cancellation attempts an absent-ID `rpc/cancel` with `request_owner: host`.
+It is best effort: a busy writer or a stream without enforceable write deadlines
+skips the control and increments `Conn.CancelDropped`, preserving other calls.
+Control writes have a 100 ms bound. Zero-byte failures leave the connection up;
+a partial control frame retires it because the stream is corrupt. Writers without
+`SetWriteDeadline` receive no cancellation controls. Reserved control capacity
+under sustained writer contention remains part of the next transport slice.
+Notifications retain supplied context metadata but acquire no wire timeout from
+their local write budget. Terminal unload never sends cancellation control.
+Deadline replies retain `*subprocess.RPCError` and its effect state while also
+matching `context.DeadlineExceeded` through `errors.Is`. An `unknown_outcome`
+reply at the local deadline (within 3 ms for wire rounding and timer skew) also
+matches that sentinel without losing its typed effect state.
+Outbound IDs are positive safe integers and fail at exhaustion instead of wrapping;
+incoming tagged IDs keep zero, integers and strings distinct. Typed-nil forward
+params are rejected locally: forward params must be a non-null object. Encoding
+reserves a ten-byte space-padded numeric timeout slot so publication can update
+the remaining budget without re-encoding the opaque payload.
+
+`plugin/unload` is terminal: SDK Serve drains and invokes cleanup once before
+replying and exiting. The default graceful stop budget is six seconds, allowing
+its five-second shutdown budget plus margin. A shorter caller context or explicit
+budget can force teardown sooner. Pre-Init unload refusal is tolerated during
+failed-start cleanup. An authored internal Health failure is unhealthy with its
+RPC cause retained. Invalid request/method/params and malformed Health results
+are protocol failures. Only SDK replies carrying `rate_limited` or
+`deadline_exceeded` return
+`*HealthInconclusiveError`: neither healthy nor unhealthy, never counted toward
+`KillAfterUnhealthy`. They break the supervisor's consecutive failure streak.
+`HealthGate` retries these probes immediately and does not refuse dispatch on
+an inconclusive verdict. The SDK shares 16 execution slots across ordinary calls
+and Health; excess concurrent calls receive typed `rate_limited` failures.
+A local health timeout with no reply is unhealthy and counts toward the kill
+threshold. A host-cancelled probe provides neither verdict and leaves the cached
+health verdict unchanged.
+
 ## Compatibility
 
-The wire protocol is plugin-sdk's `subprocess.ProtocolVersion`, currently 2, and the handshake is exact: a plugin answering another protocol fails `Start`. Protocol-1 plugins fail with a typed load-stage protocol failure; there is no fallback. Init acknowledges capability contract 1 and exact identity/version before load. Optional host services/hooks are unimplemented; supplied offers are refused before spawn, and positive acknowledgements fail before load. A plugin-sdk `ProtocolVersion` bump is a major version change here. The module requires `go 1.26.6`, so a consumer must be at Go 1.26.6 or newer, and depends on plugin-sdk and the standard library. The process-group kill is unix-only; other platforms fall back to killing the one process, and a plugin that forks leaves its helpers behind there.
+The wire protocol is plugin-sdk's `subprocess.ProtocolVersion`, currently 2, and the handshake is exact: a plugin answering another protocol fails `Start`. Protocol-1 plugins fail with a typed load-stage protocol failure; there is no fallback. Init acknowledges capability contract 1 and exact identity/version before load. Optional host services/hooks are unimplemented; supplied offers are refused before spawn, and positive acknowledgements fail before load. Typed entry points enforce this
+refusal; a raw `Client().Conn().Call("plugin/init", ...)` bypasses the guard, so
+hosts must use typed Init/handshake entry points. A plugin-sdk `ProtocolVersion` bump is a major version change here. The module requires `go 1.26.6`, so a consumer must be at Go 1.26.6 or newer, and depends on plugin-sdk and the standard library. The process-group kill is unix-only; other platforms fall back to killing the one process, and a plugin that forks leaves its helpers behind there.
 
 The exported API is pre-1.0 and unreleased; see [CHANGELOG.md](./CHANGELOG.md).
 
@@ -101,7 +143,7 @@ The tests start real child processes over the real wire: the test binary re-exec
 CI (`.github/workflows/check.yml`) is the full gate.
 
 Frames default to 8 MiB including LF in both directions. Oversized incoming
-lines are discarded without losing the connection; host-services and hooks offers are refused before spawn. Lifecycle methods send absent or empty params, never null. The
+lines are discarded without losing the connection; host-services and hooks offers are refused before spawn. Lifecycle methods with a deadline send `{"context":{"timeout_ms":N}}`; without a deadline they send absent or empty params, never null. The
 SDK is pinned by pseudo-version until a tagged plugin-sdk release carries protocol 2.
 
 Standalone `Supervise` callers must supply `SuperviseOptions.InitFactory` for

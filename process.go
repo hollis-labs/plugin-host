@@ -25,10 +25,9 @@ const drainGrace = 250 * time.Millisecond
 // # Termination
 //
 // [Process.Stop] is the graceful path: plugin/unload, then close the child's
-// stdin, then wait, then SIGKILL the whole process group. Closing stdin is
-// what actually ends a plugin-sdk plugin: Serve's loop ends on stdin EOF (or
-// SIGTERM), waits for in-flight requests, and calls the plugin's Unload. An
-// unload over RPC alone does not end it. The kernel is the backstop: if the
+// stdin, then wait, then SIGKILL the whole process group. The unload reply is terminal: SDK Serve
+// drains and cleans up once before writing it and exiting. Closing stdin also
+// ends a failed or unresponsive connection. The kernel is the backstop: if the
 // host dies, the plugin's pipes close and the plugin reaps itself.
 //
 // # What a Process never does
@@ -363,8 +362,13 @@ func (p *Process) stop(ctx context.Context) error {
 		// answer plugin/unload is exactly the one the stronger steps exist
 		// for, and it is stopped correctly anyway.
 		p.unloadErr = p.client.Unload(graceful)
-		// Closing stdin is the SDK's own shutdown path. It is done whether or
-		// not the unload call worked.
+		// Before Init, the SDK refuses unload but still performs terminal cleanup.
+		var rpcErr *subprocess.RPCError
+		if p.Info().ID == "" && errors.As(p.unloadErr, &rpcErr) && rpcErr.Code == subprocess.ErrCodeInvalidRequest {
+			p.unloadErr = nil
+		}
+		// No further RPC is sent after the terminal reply. EOF is a fallback
+		// for failed-start cleanup and peers that cannot acknowledge unload.
 		_ = p.stdin.Close()
 		select {
 		case <-p.exited:
