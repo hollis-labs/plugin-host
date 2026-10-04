@@ -300,6 +300,9 @@ func (s *Supervisor) restart(crashed *Process, info ExitInfo) (*Process, bool) {
 				// decided to stop this plugin.
 				stopErr := next.Stop(context.Background())
 				s.releaseAttempt(stopErr)
+			} else {
+				// Start reaps a child whose canceled handshake failed.
+				s.releaseAttempt(nil)
 			}
 			return nil, false
 		}
