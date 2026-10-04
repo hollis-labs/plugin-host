@@ -224,7 +224,16 @@ func (l *Lifecycle) failure(stage Stage, step string, g uint64, err error) *Fail
 		step = f.Step
 		stage = f.Stage
 	}
-	return &Failure{PluginID: l.id, Generation: g, Stage: stage, Step: step, Code: code, Retryable: IsTransient(err), Cause: err}
+	diagnostic := ""
+	var detail *MismatchError
+	if errors.As(err, &detail) {
+		diagnostic = detail.Error()
+		// Nested process diagnostics already applied the host's redaction.
+		if f != nil && f.Diagnostic != "" {
+			diagnostic = f.Diagnostic
+		}
+	}
+	return &Failure{PluginID: l.id, Generation: g, Stage: stage, Step: step, Code: code, Retryable: IsTransient(err), Cause: err, Diagnostic: diagnostic}
 }
 func callback(ctx context.Context, fn func() error) (err error) {
 	defer func() {
@@ -285,10 +294,10 @@ func (l *Lifecycle) preflight(ctx context.Context) (Plan, *Failure) {
 	}
 	p.Spec.ID = l.id
 	if p.Spec.ExpectedID != l.id {
-		return p, l.failure(StageCompat, "identity", 0, ErrIdentityMismatch)
+		return p, l.failure(StageCompat, "identity", 0, mismatch("id", l.id, p.Spec.ExpectedID))
 	}
 	if _, e := parseVersion(p.Spec.ExpectedVersion); e != nil {
-		return p, l.failure(StageCompat, "version", 0, e)
+		return p, l.failure(StageCompat, "version", 0, errors.Join(mismatch("version", "strict SemVer", p.Spec.ExpectedVersion), e))
 	}
 	for _, v := range p.Versions {
 		if err = CheckVersion(v); err != nil {

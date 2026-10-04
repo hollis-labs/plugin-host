@@ -51,7 +51,7 @@ func validateInitParams(p subprocess.InitParams) error {
 
 func validateInit(s Spec) error {
 	if strings.TrimSpace(s.ExpectedID) != "" && s.ExpectedID != s.Init.Incarnation.OwnerID {
-		return processFailure(s, "identity", ErrIdentityMismatch)
+		return processFailure(s, "identity", mismatch("id", s.Init.Incarnation.OwnerID, s.ExpectedID))
 	}
 	if strings.TrimSpace(s.ExpectedID) == "" {
 		return initFailure(s, &subprocess.InitError{Code: subprocess.InitInvalid, Field: "id"})

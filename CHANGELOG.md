@@ -11,6 +11,11 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Added
 
+- `MismatchError` carries bounded printable expected/actual identity and version
+  metadata while retaining mismatch sentinels. Lifecycle failures preserve the
+  nested redacted mismatch diagnostic and typed cause.
+
+
 - `Supervisor.PendingFactory` and `ErrInitFactoryPending` expose host factory
   work still running after cancellation, including through bounded Stop.
 - Per-plugin `Lifecycle` with staged planning, compatibility checks, persisted
