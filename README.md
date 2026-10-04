@@ -74,7 +74,7 @@ func main() {
 
 ## Compatibility
 
-The wire protocol is plugin-sdk's `subprocess.ProtocolVersion`, currently 2, and the handshake is exact: a plugin answering another protocol fails `Start`. Protocol-1 plugins fail with a typed load-stage protocol failure; there is no fallback. Init acknowledges capability contract 1 and exact identity/version before load. Optional host services/hooks are unimplemented; valid supplied offers can be visibly declined, but positive acknowledgements fail before load. A plugin-sdk `ProtocolVersion` bump is a major version change here. The module requires `go 1.26.6`, so a consumer must be at Go 1.26.6 or newer, and depends on plugin-sdk and the standard library. The process-group kill is unix-only; other platforms fall back to killing the one process, and a plugin that forks leaves its helpers behind there.
+The wire protocol is plugin-sdk's `subprocess.ProtocolVersion`, currently 2, and the handshake is exact: a plugin answering another protocol fails `Start`. Protocol-1 plugins fail with a typed load-stage protocol failure; there is no fallback. Init acknowledges capability contract 1 and exact identity/version before load. Optional host services/hooks are unimplemented; supplied offers are refused before spawn, and positive acknowledgements fail before load. A plugin-sdk `ProtocolVersion` bump is a major version change here. The module requires `go 1.26.6`, so a consumer must be at Go 1.26.6 or newer, and depends on plugin-sdk and the standard library. The process-group kill is unix-only; other platforms fall back to killing the one process, and a plugin that forks leaves its helpers behind there.
 
 The exported API is pre-1.0 and unreleased; see [CHANGELOG.md](./CHANGELOG.md).
 
@@ -108,3 +108,9 @@ Frames default to 8 MiB including LF in both directions. Oversized incoming
 lines are discarded without losing the connection; offers cannot advertise a
 larger frame. Lifecycle methods send absent or empty params, never null. The
 SDK is pinned by pseudo-version until the first plugin-mcp tag.
+
+Standalone `Supervise` callers must supply `SuperviseOptions.InitFactory` for
+restarts. It runs on each attempt (including the first), with a monotonically
+increasing attempt number; the host issues a fresh generation and grants.
+Without a factory an unexpected exit is terminal. `Lifecycle` owns and
+replaces `Spec.Init.Incarnation` with its issued tuple.

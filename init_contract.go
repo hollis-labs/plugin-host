@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
@@ -11,6 +12,7 @@ import (
 // initFailure keeps SDK contract errors typed and maps protocol mismatch to
 // the host sentinel, including rejected legacy acknowledgements.
 func initFailure(s Spec, err error) *Failure {
+	err = initRPCError(err)
 	step := "init"
 	var typed *subprocess.InitError
 	if errors.As(err, &typed) {
@@ -37,16 +39,16 @@ func initFailure(s Spec, err error) *Failure {
 }
 
 func validateInitParams(p subprocess.InitParams) error {
-	if err := p.Validate(); err != nil {
-		return err
+	if p.HostServices != nil || p.HooksProfile != nil {
+		return &subprocess.InitError{Code: subprocess.InitProfileMismatch, Field: "unsupported_profile", Expected: 0, Received: 1}
 	}
-	if p.HostServices != nil && p.HostServices.Limits.MaxFrameBytes > defaultMaxFrame {
-		return &subprocess.InitError{Code: subprocess.InitInvalid, Field: "host_services.limits.max_frame_bytes"}
-	}
-	return nil
+	return p.Validate()
 }
 
 func validateInit(s Spec) error {
+	if strings.TrimSpace(s.ExpectedID) == "" {
+		return initFailure(s, &subprocess.InitError{Code: subprocess.InitInvalid, Field: "id"})
+	}
 	if err := validateInitParams(s.Init); err != nil {
 		return initFailure(s, err)
 	}
@@ -73,4 +75,46 @@ func decodeInitResult(raw json.RawMessage) (subprocess.InitResult, error) {
 		return result, err
 	}
 	return result, nil
+}
+
+// initRPCError preserves the transport error while exposing the SDK contract cause.
+func initRPCError(err error) error {
+	var typed *subprocess.InitError
+	if errors.As(err, &typed) {
+		return err
+	}
+	var rpc *subprocess.RPCError
+	if !errors.As(err, &rpc) || rpc.Code != -32602 {
+		return err
+	}
+	raw, marshalErr := json.Marshal(rpc.Data)
+	if marshalErr != nil {
+		return err
+	}
+	var data struct {
+		Contract string                     `json:"contract"`
+		Code     subprocess.InitFailureCode `json:"code"`
+		Field    string                     `json:"field"`
+		Expected int                        `json:"expected"`
+		Received int                        `json:"received"`
+	}
+	if json.Unmarshal(raw, &data) != nil || data.Contract != "plugin-init/2" || data.Field == "" {
+		return err
+	}
+	switch data.Code {
+	case subprocess.InitInvalid, subprocess.InitProtocolMismatch, subprocess.InitCapabilityContractMismatch, subprocess.InitProfileMismatch:
+		return errors.Join(err, &subprocess.InitError{Code: data.Code, Field: data.Field, Expected: data.Expected, Received: data.Received})
+	default:
+		return err
+	}
+}
+
+func verifyInitResult(params subprocess.InitParams, result subprocess.InitResult) error {
+	if err := subprocess.ValidateInitResult(params, result); err != nil {
+		return err
+	}
+	if result.ReverseRPCVersion != nil || result.HooksProfileVersion != nil {
+		return &subprocess.InitError{Code: subprocess.InitProfileMismatch, Field: "unsupported_profile", Expected: 0, Received: 1}
+	}
+	return nil
 }

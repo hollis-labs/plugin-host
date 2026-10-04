@@ -48,9 +48,13 @@ func (c *Client) Init(ctx context.Context, params subprocess.InitParams) (subpro
 	}
 	raw, err := c.conn.Call(ctx, subprocess.MethodInit, params)
 	if err != nil {
-		return subprocess.InitResult{}, err
+		return subprocess.InitResult{}, initRPCError(err)
 	}
-	return decodeInitResult(raw)
+	result, err := decodeInitResult(raw)
+	if err == nil {
+		err = verifyInitResult(params, result)
+	}
+	return result, err
 }
 
 // Load sends plugin/load.

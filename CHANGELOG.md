@@ -25,9 +25,9 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Changed
 
-- Pin protocol 2 to the SDK pseudo-version until the first plugin-mcp tag.
+- Pin protocol 2 to the SDK pseudo-version until a tagged plugin-sdk release carries protocol 2.
 - Default frames are 8 MiB including LF in both directions; profile offers
-  cannot advertise a larger frame. Lifecycle methods omit params or send {}.
+  are refused until host services and hooks are implemented. Lifecycle methods omit params or send {}.
 
 - Cooperative cancellation receives a bounded grace before pending quarantine;
   reload preflight timeouts preserve the serving generation and failure status.
@@ -104,3 +104,11 @@ refuses a tag whose CHANGELOG has no heading for it.
   supervision loop releases `Stop`.
 - `Conn.Notify` is bounded by the default call timeout as a write deadline, so
   a plugin that stops reading stdin cannot hold the write lock indefinitely.
+
+- Breaking: Init uses Grants instead of Granted; Spawn requires complete Init
+  authority and reports typed failures. The R12 response cap is 8 MiB.
+- Standalone supervised restarts require InitFactory to issue fresh incarnation
+  tuples and grants; a missing factory ends supervision. Client.Init validates
+  results before returning them.
+- Export FixtureInit and invalid-contract, profile-ack and duplicate-init fixture
+  behaviors for protocol conformance tests.

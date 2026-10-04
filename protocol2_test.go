@@ -131,17 +131,21 @@ func TestLifecycleRejectsPreparedForeignIncarnation(t *testing.T) {
 		t.Fatal("foreign prepared incarnation accepted", err)
 	}
 }
-func TestOptionalProfilesAreVisiblyDeclined(t *testing.T) {
-	spec, _ := fixtureSpec(t, pluginhosttest.BehaviourEcho)
-	spec.Init.HooksProfile = &subprocess.HooksProfile{HooksProfileVersion: 1}
-	spec.Init.HostServices = &subprocess.HostServices{ReverseRPCVersion: 1, Incarnation: spec.Init.Incarnation, Methods: []string{}, Limits: subprocess.HostServiceLimits{HostToPluginInflight: 1, PluginToHostInflight: 1, HostGlobalInflight: 1, ControlSlots: 2, MaxFrameBytes: 8 << 20, MaxQueuedWriteBytes: 8 << 20, WriteTimeoutMS: 100, MaxDepth: 1, MethodTimeoutMS: map[string]uint32{}}}
-	p, err := pluginhost.Start(context.Background(), spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = p.Stop(context.Background()) })
-	if p.Info().ReverseRPCVersion != nil || p.Info().HooksProfileVersion != nil {
-		t.Fatal("unimplemented profiles accepted")
+func TestOptionalProfilesAreRefusedBeforeSpawn(t *testing.T) {
+	for _, hooks := range []bool{false, true} {
+		spec, _ := fixtureSpec(t, pluginhosttest.BehaviourEcho)
+		if hooks {
+			spec.Init.HooksProfile = &subprocess.HooksProfile{HooksProfileVersion: 1}
+		} else {
+			spec.Init.HostServices = &subprocess.HostServices{ReverseRPCVersion: 1, Incarnation: spec.Init.Incarnation, Methods: []string{}, Limits: subprocess.HostServiceLimits{HostToPluginInflight: 1, PluginToHostInflight: 1, HostGlobalInflight: 1, ControlSlots: 2, MaxFrameBytes: 8 << 20, MaxQueuedWriteBytes: 8 << 20, WriteTimeoutMS: 100, MaxDepth: 1, MethodTimeoutMS: map[string]uint32{}}}
+		}
+		spawned := false
+		spec.BeforeSpawn = func(context.Context) error { spawned = true; return nil }
+		_, err := pluginhost.Start(context.Background(), spec)
+		var typed *subprocess.InitError
+		if spawned || !errors.As(err, &typed) || typed.Code != subprocess.InitProfileMismatch {
+			t.Fatalf("spawned=%v err=%v", spawned, err)
+		}
 	}
 }
 

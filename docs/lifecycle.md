@@ -3,14 +3,21 @@
 A `Lifecycle` manages one plugin ID, separate desired intent and actual state,
 serialized enable/disable/reload, and generation-owned resources. It uses
 individual `Process` instances and owns its one retry loop. It never nests a
-`Supervisor`. Process-only hosts can keep using `Start` or `Supervise`.
+`Supervisor`. Process-only hosts can use `Start` or `Supervise`. Standalone `Supervise`
+restarts require `SuperviseOptions.InitFactory`: the host supplies a fresh
+incarnation and fresh grants for every attempt, including the first. A missing
+factory makes an unexpected exit terminal. The attempt number starts at one
+and never resets when the restart budget refills. The factory must honor its
+context; `HandshakeTimeout` bounds it and `Stop` cancels it.
 
 This implementation consumes the SDK's protocol-2 `subprocess.InitParams` /
 `InitResult` and `capability.GrantSet` directly. Capability contract 1 and the
 issued incarnation are validated before any child starts. Protocol 1 has no
 fallback. Reverse services and hooks are unimplemented: the controller adds no
-profile offers, and a positive acknowledgement is refused before load. A valid
-host-supplied optional offer may be visibly declined (omitted acknowledgement).
+profile offers. Host-supplied offers are refused before spawn, and a positive
+acknowledgement is refused before load. The controller overwrites a Plan's
+incarnation with its issued tuple before `PrepareScope`; the prepared spec
+must retain that tuple.
 
 ## Host adapter
 

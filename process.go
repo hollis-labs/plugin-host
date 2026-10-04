@@ -215,13 +215,8 @@ func (p *Process) initialize(ctx context.Context) (subprocess.InitResult, error)
 }
 
 func (p *Process) verify(result subprocess.InitResult) error {
-	if err := subprocess.ValidateInitResult(p.spec.Init, result); err != nil {
+	if err := verifyInitResult(p.spec.Init, result); err != nil {
 		return initFailure(p.spec, err)
-	}
-	// This driver has no reverse or hooks implementation. A valid offer may
-	// be declined, but an acknowledgement cannot activate unsupported services.
-	if result.ReverseRPCVersion != nil || result.HooksProfileVersion != nil {
-		return initFailure(p.spec, &subprocess.InitError{Code: subprocess.InitProfileMismatch, Field: "unsupported_profile", Expected: 0, Received: 1})
 	}
 	if result.Protocol != subprocess.ProtocolVersion {
 		return processFailure(p.spec, "protocol", fmt.Errorf("%w: plugin speaks %d, host speaks %d", ErrProtocolMismatch, result.Protocol, subprocess.ProtocolVersion))

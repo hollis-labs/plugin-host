@@ -296,7 +296,7 @@ func TestSupervisorPermanentReplacementFailureIsNotRetried(t *testing.T) {
 		return nil
 	}
 	ev := newEvents()
-	sup := pluginhost.Supervise(spec, ev.options(fastPolicy(3)))
+	sup := pluginhost.Supervise(spec, freshInitOptions(spec, ev.options(fastPolicy(3))))
 	if err := sup.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}

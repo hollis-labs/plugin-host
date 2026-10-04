@@ -51,7 +51,7 @@ func fastPolicy(restarts int) pluginhost.RestartPolicy {
 func startSupervised(t *testing.T, behavior string, o pluginhost.SuperviseOptions, extraEnv ...string) (*pluginhost.Supervisor, string) {
 	t.Helper()
 	spec, dir := fixtureSpec(t, behavior, extraEnv...)
-	sup := pluginhost.Supervise(spec, o)
+	sup := pluginhost.Supervise(spec, freshInitOptions(spec, o))
 	if err := sup.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -490,4 +490,13 @@ func TestNotifyToAPluginThatStoppedReadingIsBoundedAndDoesNotWedgeCalls(t *testi
 	case <-time.After(8 * time.Second):
 		t.Fatal("a later call deadlocked behind the blocked Notify")
 	}
+}
+
+func freshInitOptions(spec pluginhost.Spec, o pluginhost.SuperviseOptions) pluginhost.SuperviseOptions {
+	o.InitFactory = func(_ context.Context, attempt uint64) (subprocess.InitParams, error) {
+		params := spec.Init
+		params.Incarnation.OwnerGeneration = attempt
+		return params, nil
+	}
+	return o
 }

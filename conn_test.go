@@ -2,6 +2,7 @@ package pluginhost
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -480,5 +481,48 @@ func TestDefaultInboundCapDropsOversizedFrameAndKeepsConnection(t *testing.T) {
 	}
 	if p.conn.InboundDropped() != 1 {
 		t.Fatal("default inbound cap did not drop oversized frame")
+	}
+}
+
+func TestExactOutboundFrameBoundary(t *testing.T) {
+	for _, size := range []int{8 << 20, (8 << 20) + 1} {
+		var written bytes.Buffer
+		reader, writer := io.Pipe()
+		conn := NewConn(reader, &written)
+		base, _ := json.Marshal(subprocess.RPCRequest{JSONRPC: "2.0", Method: "boundary", Params: map[string]string{"blob": ""}})
+		err := conn.Notify("boundary", map[string]string{"blob": strings.Repeat("x", size-len(base)-1)})
+		if size == 8<<20 {
+			if err != nil || written.Len() != size {
+				t.Fatalf("exact cap: bytes=%d err=%v", written.Len(), err)
+			}
+		} else if !errors.Is(err, ErrFrameTooLarge) || written.Len() != 0 {
+			t.Fatalf("over cap: bytes=%d err=%v", written.Len(), err)
+		}
+		_ = conn.Close()
+		_ = writer.Close()
+	}
+}
+
+func TestExactInboundFrameBoundary(t *testing.T) {
+	p := newPeer(t)
+	for _, size := range []int{8 << 20, (8 << 20) + 1} {
+		call := callAsync(context.Background(), p.conn, "boundary")
+		request := p.request()
+		prefix := `{"jsonrpc":"2.0","id":` + itoa(request.ID) + `,"result":"`
+		suffix := `"}`
+		payload := strings.Repeat("x", size-len(prefix)-len(suffix)-1)
+		p.raw(prefix + payload + suffix)
+		if size == 8<<20 {
+			got := await(t, call)
+			if got.err != nil || len(got.raw) != len(payload)+2 {
+				t.Fatalf("exact cap: bytes=%d err=%v", len(got.raw), got.err)
+			}
+		} else {
+			p.reply(request.ID, `"after dropped frame"`)
+			got := await(t, call)
+			if got.err != nil || string(got.raw) != `"after dropped frame"` || p.conn.InboundDropped() != 1 {
+				t.Fatalf("over cap delivered: %v drops=%d", got.err, p.conn.InboundDropped())
+			}
+		}
 	}
 }

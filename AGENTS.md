@@ -29,7 +29,7 @@ Always `GOWORK=off`: a parent `go.work` would hide a missing or wrong dependency
 ## Boundaries
 
 - No `replace` directive in `go.mod` and no committed `go.work`: consumers cannot resolve either.
-- Dependencies are the standard library and `github.com/hollis-labs/plugin-sdk` (pinned tag, or a pinned pseudo-version until the first plugin-mcp tag) only, and every dependency's `go` line must stay at or below this module's `go 1.26.6`. plugin-sdk must never import this module.
+- Dependencies are the standard library and `github.com/hollis-labs/plugin-sdk` (pinned tag, or a pinned pseudo-version until a tagged plugin-sdk release carries protocol 2) only, and every dependency's `go` line must stay at or below this module's `go 1.26.6`. plugin-sdk must never import this module.
 - No exported identifier names an application (Tangent, Nanite, Cerberus, Tachyon, Station). Those hosts adapt this library; the library does not know them.
 - Never use `exec.CommandContext` for a plugin. It ties the plugin's life to the context that started it, which is usually a boot context, and kills a healthy plugin when it ends. `TestCancellingTheStartContextDoesNotKillThePlugin` and conformance R16 guard it.
 - The child's environment is exactly `Spec.Env`; nil means empty, never inherit. `TestSpecEnvIsExact`, `TestNilEnvMeansEmptyNotInherit`.
