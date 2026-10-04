@@ -137,6 +137,23 @@ A local health timeout with no reply is unhealthy and counts toward the kill
 threshold. A host-cancelled probe provides neither verdict and leaves the cached
 health verdict unchanged.
 
+`Supervisor.Status()` and `Lifecycle.Status()` provide copied, typed snapshots
+for host health reports. `Exhausted` means an explicitly retryable failure used
+up its restart budget; permanent failures do not set it. `LastFailure` preserves
+the terminal cause, while `LastExit` identifies the last failed, reaped child's `Owner`,
+`ExitInfo` (exit code, signal and error) and `StderrTail`. The tail uses existing
+`Tail` secret redaction and `Spec.Redact`, then is capped to `Spec.StderrBytes`
+(default 4096 bytes), including when the host redactor expands its output. Status
+and formatted process errors own bounded copies, so discarded redactor output
+does not remain allocated through a clipped string.
+Automatic recovery retains the last exit; explicit Lifecycle Enable/Reload
+starts a new attempt cycle and clears it. Status summaries include “restart
+attempts exhausted” and the exit code/signal; hosts can display `StderrTail`
+directly and use the typed fields without parsing those summaries.
+
+Hosts are responsible for child cleanup if they die without unloading: a stuck
+plugin can ignore closed stdin and remain orphaned.
+
 ## Compatibility
 
 The wire protocol is plugin-sdk's `subprocess.ProtocolVersion`, currently 2, and the handshake is exact: a plugin answering another protocol fails `Start`. Protocol-1 plugins fail with a typed load-stage protocol failure; there is no fallback. Init acknowledges capability contract 1 and exact identity/version before load. Optional host services/hooks are unimplemented; supplied offers are refused before spawn, and positive acknowledgements fail before load. Typed entry points enforce this

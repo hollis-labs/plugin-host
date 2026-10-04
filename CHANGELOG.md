@@ -11,6 +11,9 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Fixed
 
+- Status snapshots and formatted terminal errors retain bounded copies of stderr
+  after host redaction, so clipped strings cannot retain an expanded allocation.
+  Lifecycle recovery tests read the current process once per replacement poll.
 - Supervisor retains the first health-kill cause and stops health polling after
   killing a child; a buffered probe cannot replace a timeout with ErrGone.
 
@@ -25,6 +28,13 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Added
 
+- `Supervisor.Status`, `SupervisorStatus`, and shared `ExitStatus` expose typed
+  restart exhaustion, terminal failure and the last reaped child's owner, exit
+  information and bounded stderr tail. `LifecycleStatus.LastExit` retains the
+  same diagnostics across automatic recovery; explicit attempt cycles reset it.
+  Tails apply secret and host redaction and remain bounded after host redaction.
+  Status summaries surface restart exhaustion and exit code/signal. Document
+  host responsibility for children orphaned after host death without unload.
 - Publication-ordered positive JS-safe IDs, strict direction-aware reply
   demultiplexing and pending-method result validation. Pending correlation is
   registered before the first byte; canceled unselected calls consume no ID.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,6 +73,9 @@ type Supervisor struct {
 	stopped        bool
 	healthKilled   *Process
 	healthFailure  error
+	exhausted      bool
+	lastFailure    *Failure
+	lastExit       *ExitStatus
 
 	stopOnce   sync.Once
 	stopping   chan struct{}
@@ -108,6 +112,9 @@ func (s *Supervisor) Start(ctx context.Context) error {
 		return errors.New("pluginhost: supervisor already started")
 	}
 	s.started = true
+	s.exhausted = false
+	s.lastFailure = nil
+	s.lastExit = nil
 	s.mu.Unlock()
 
 	// A Stop that arrives mid-handshake cancels it instead of waiting it out.
@@ -117,11 +124,19 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	spec, err := s.attemptSpec(hctx)
 	var p *Process
 	if err == nil {
-		p, err = Start(hctx, spec)
+		p, err = startStatusProcess(hctx, spec)
 	}
 	if err != nil {
+		s.recordExit(p)
+		var failure *Failure
+		if errors.As(err, &failure) {
+			failure = cloneFailure(failure)
+		} else {
+			failure = processFailure(s.spec, "start", err)
+		}
 		s.releaseAttempt(nil)
 		s.mu.Lock()
+		s.lastFailure = failure
 		s.started = false
 		stopped := s.stopped
 		s.mu.Unlock()
@@ -218,8 +233,13 @@ func (s *Supervisor) run(p *Process) {
 		}
 		s.releaseAttempt(nil)
 		info, _ := p.ExitInfo()
+		exit := snapshotExit(p)
 		s.mu.Lock()
 		info.SupervisorInitiatedKill = s.healthKilled == p
+		if exit != nil {
+			exit.Info.SupervisorInitiatedKill = info.SupervisorInitiatedKill
+			s.lastExit = exit
+		}
 		healthFailure := s.healthFailure
 		s.healthKilled = nil
 		s.healthFailure = nil
@@ -267,8 +287,8 @@ func (s *Supervisor) restart(crashed *Process, info ExitInfo, healthFailure erro
 		attempt := s.restarts
 		s.mu.Unlock()
 
-		delay, allowed := s.opts.Policy.Backoff(attempt)
-		allowed = allowed && retryable
+		delay, budgetAvailable := s.opts.Policy.Backoff(attempt)
+		allowed := budgetAvailable && retryable
 		if !notified {
 			notified = true
 			if s.opts.OnExit != nil {
@@ -276,7 +296,7 @@ func (s *Supervisor) restart(crashed *Process, info ExitInfo, healthFailure erro
 			}
 		}
 		if !allowed {
-			s.giveUp(crashed, attempt, lastErr)
+			s.giveUp(crashed, attempt, lastErr, retryable && !budgetAvailable)
 			return nil, false
 		}
 
@@ -292,9 +312,12 @@ func (s *Supervisor) restart(crashed *Process, info ExitInfo, healthFailure erro
 		spec, err := s.attemptSpec(s.ctx)
 		var next *Process
 		if err == nil {
-			next, err = Start(s.ctx, spec)
+			next, err = startStatusProcess(s.ctx, spec)
 		}
 
+		if err != nil {
+			s.recordExit(next)
+		}
 		s.mu.Lock()
 		if s.isStopping() {
 			s.mu.Unlock()
@@ -326,16 +349,23 @@ func (s *Supervisor) restart(crashed *Process, info ExitInfo, healthFailure erro
 	}
 }
 
-func (s *Supervisor) giveUp(crashed *Process, attempt int, lastErr error) {
-	if s.opts.OnGiveUp == nil {
-		return
-	}
+func (s *Supervisor) giveUp(crashed *Process, attempt int, lastErr error, exhausted bool) {
 	err := fmt.Errorf("pluginhost: %s stopped after %d restarts (terminal failure or exhausted budget)%s",
 		s.spec.label(), attempt, crashed.diagnosticsText())
 	if lastErr != nil {
-		err = &Failure{PluginID: s.spec.ID, Stage: StageLoad, Step: "exit", Code: "supervision_ended", Cause: errors.Join(err, lastErr), Diagnostic: safeDiagnostic(s.spec, err.Error()+"; reason: "+lastErr.Error())}
+		err = &Failure{PluginID: s.spec.ID, Stage: StageLoad, Step: "exit", Code: "supervision_ended", Cause: errors.Join(err, lastErr), Diagnostic: strings.Clone(safeDiagnostic(s.spec, err.Error()+"; reason: "+lastErr.Error()))}
 	}
-	s.opts.OnGiveUp(err)
+	var failure *Failure
+	if !errors.As(err, &failure) {
+		failure = &Failure{PluginID: s.spec.ID, Stage: StageLoad, Step: "exit", Code: "supervision_ended", Cause: err, Diagnostic: strings.Clone(safeDiagnostic(s.spec, err.Error()))}
+	}
+	s.mu.Lock()
+	s.exhausted = exhausted
+	s.lastFailure = failure
+	s.mu.Unlock()
+	if s.opts.OnGiveUp != nil {
+		s.opts.OnGiveUp(err)
+	}
 }
 
 // watch blocks until p exits (true) or the supervisor is stopped (false),

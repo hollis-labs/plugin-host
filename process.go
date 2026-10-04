@@ -296,7 +296,7 @@ func (p *Process) Diagnostics() string {
 }
 
 func (p *Process) diagnosticsText() string {
-	text := strings.TrimSpace(p.Diagnostics())
+	text := strings.TrimSpace(retainedStderr(p))
 	if text == "" {
 		return ""
 	}
