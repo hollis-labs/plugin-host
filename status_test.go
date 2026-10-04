@@ -121,7 +121,10 @@ func TestLifecycleStatusRestartExhaustion(t *testing.T) {
 	first := l.Current()
 	owner := l.Status().Owner
 	exitStatusChild(first)
-	eventually(t, supervisorWait, "lifecycle replacement", func() bool { return l.Current() != nil && l.Current() != first })
+	eventually(t, supervisorWait, "lifecycle replacement", func() bool {
+		candidate := l.Current()
+		return candidate != nil && candidate != first
+	})
 	s := l.Status()
 	assertExitStatus(t, s.LastExit, owner)
 	if s.Exhausted || s.State != pluginhost.StateRunning {

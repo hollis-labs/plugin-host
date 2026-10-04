@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ExitStatus is the last failed, reaped child in an attempt cycle. Owner identifies
@@ -83,13 +84,20 @@ func snapshotExit(p *Process) *ExitStatus {
 	if !done {
 		return nil
 	}
+	text := retainedStderr(p)
+	tuple := p.spec.Init.Incarnation
+	return &ExitStatus{Owner: Owner{HostInstance: tuple.HostInstance, OwnerID: tuple.OwnerID, OwnerGeneration: tuple.OwnerGeneration}, Info: info, StderrTail: text}
+}
+
+// Own the bounded bytes so a redactor's large string (or a small view into one)
+// cannot remain reachable through a status snapshot or formatted process error.
+func retainedStderr(p *Process) string {
 	text := p.Diagnostics() // Calls the host redactor without a status lock held.
 	limit := p.tail.limit()
 	if len(text) > limit {
 		text = text[len(text)-limit:]
 	}
-	tuple := p.spec.Init.Incarnation
-	return &ExitStatus{Owner: Owner{HostInstance: tuple.HostInstance, OwnerID: tuple.OwnerID, OwnerGeneration: tuple.OwnerGeneration}, Info: info, StderrTail: text}
+	return strings.Clone(text)
 }
 
 func (s *Supervisor) recordExit(p *Process) {

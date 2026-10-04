@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -352,11 +353,11 @@ func (s *Supervisor) giveUp(crashed *Process, attempt int, lastErr error, exhaus
 	err := fmt.Errorf("pluginhost: %s stopped after %d restarts (terminal failure or exhausted budget)%s",
 		s.spec.label(), attempt, crashed.diagnosticsText())
 	if lastErr != nil {
-		err = &Failure{PluginID: s.spec.ID, Stage: StageLoad, Step: "exit", Code: "supervision_ended", Cause: errors.Join(err, lastErr), Diagnostic: safeDiagnostic(s.spec, err.Error()+"; reason: "+lastErr.Error())}
+		err = &Failure{PluginID: s.spec.ID, Stage: StageLoad, Step: "exit", Code: "supervision_ended", Cause: errors.Join(err, lastErr), Diagnostic: strings.Clone(safeDiagnostic(s.spec, err.Error()+"; reason: "+lastErr.Error()))}
 	}
 	var failure *Failure
 	if !errors.As(err, &failure) {
-		failure = &Failure{PluginID: s.spec.ID, Stage: StageLoad, Step: "exit", Code: "supervision_ended", Cause: err, Diagnostic: safeDiagnostic(s.spec, err.Error())}
+		failure = &Failure{PluginID: s.spec.ID, Stage: StageLoad, Step: "exit", Code: "supervision_ended", Cause: err, Diagnostic: strings.Clone(safeDiagnostic(s.spec, err.Error()))}
 	}
 	s.mu.Lock()
 	s.exhausted = exhausted
