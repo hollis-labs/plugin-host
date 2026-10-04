@@ -5,6 +5,7 @@ package pluginhost_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -513,4 +514,58 @@ func freshInitOptions(spec pluginhost.Spec, o pluginhost.SuperviseOptions) plugi
 		return params, nil
 	}
 	return o
+}
+
+func TestSupervisorDoesNotKillSixteenBusySDKSlots(t *testing.T) {
+	sup, dir := startSupervised(t, pluginhosttest.BehaviourEcho, pluginhost.SuperviseOptions{HealthInterval: 20 * time.Millisecond, HealthTimeout: time.Second, KillAfterUnhealthy: 2})
+	p := sup.Current()
+	var wg sync.WaitGroup
+	results := make(chan error, 16)
+	for index := range 16 {
+		marker := filepath.Join(dir, fmt.Sprintf("entered-%d", index))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := p.Client().MCPCallTool(context.Background(), subprocess.MCPCallRequest{ToolName: "hold", Arguments: map[string]any{"entered": marker, "release": filepath.Join(dir, "release-holds")}})
+			results <- err
+		}()
+	}
+	deadline := time.Now().Add(supervisorWait)
+	for index := range 16 {
+		marker := filepath.Join(dir, fmt.Sprintf("entered-%d", index))
+		for {
+			if _, err := os.Stat(marker); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("SDK handler not admitted")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	_, err := p.Client().Health(context.Background())
+	if !errors.Is(err, pluginhost.ErrHealthInconclusive) || errors.Is(err, pluginhost.ErrUnhealthy) {
+		t.Fatal(err)
+	}
+	// Hold every SDK slot through several health intervals, then release using
+	// a file barrier rather than timing the ordinary handlers' completion.
+	time.Sleep(100 * time.Millisecond)
+	if err := os.WriteFile(filepath.Join(dir, "release-holds"), []byte("release"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-p.Exited():
+		t.Fatal("busy plugin killed")
+	default:
+	}
+	if sup.Current() != p {
+		t.Fatal("busy plugin replaced")
+	}
 }

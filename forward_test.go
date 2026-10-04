@@ -120,6 +120,12 @@ func TestCancellationPublishesClosedHostOwnedControl(t *testing.T) {
 			if params.ID != req.ID || params.RequestOwner != subprocess.HostRPCOwnerHost || params.Reason != want {
 				t.Fatalf("wrong cancellation: %+v", params)
 			}
+			if err := p.conn.Notify("barrier", nil); err != nil {
+				t.Fatal(err)
+			}
+			if next := p.frame(); next.Method != "barrier" {
+				t.Fatalf("duplicate control before barrier: %+v", next)
+			}
 		})
 	}
 }

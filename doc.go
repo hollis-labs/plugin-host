@@ -40,7 +40,9 @@
 //   - The plugin never dies with its start context: a process is never built
 //     with exec.CommandContext.
 //   - A call's context bounds that call and carries its remaining forward budget.
-//     Cancellation sends host-owned rpc/cancel; late replies are dropped.
+//     Cancellation attempts best-effort host-owned rpc/cancel; late replies are
+//     dropped. Failed cancellation control does not retire the connection.
+//     Deadline RPC errors also match context.DeadlineExceeded.
 //   - When the pipe ends, every waiter fails at once with [ErrGone], and a
 //     final frame written before the exit is delivered first.
 //   - A request over the frame cap (8 MiB, the limit plugin-sdk's Serve

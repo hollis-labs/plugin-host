@@ -76,7 +76,14 @@ Calls to SDK forward methods carry `context.timeout_ms` from the remaining local
 call budget. An existing shorter DTO budget narrows the call; writer wait consumes
 it. `WithForwardBinding` carries a host-issued reference without creating authority.
 With no deadline and a disabled connection default, no wire deadline is invented.
-Caller cancellation sends absent-ID `rpc/cancel` with `request_owner: host`.
+Caller cancellation attempts an absent-ID `rpc/cancel` with `request_owner: host`.
+It is best effort: a busy writer or a stream without enforceable write deadlines
+skips the control and increments `Conn.CancelDropped`, preserving other calls.
+Control writes have a 100 ms bound and never close the connection on failure.
+Notifications retain supplied context metadata but acquire no wire timeout from
+their local write budget. Terminal unload never sends cancellation control.
+Deadline replies retain `*subprocess.RPCError` and its effect state while also
+matching `context.DeadlineExceeded` through `errors.Is`.
 Outbound IDs are positive safe integers and fail at exhaustion instead of wrapping;
 incoming tagged IDs keep zero, integers and strings distinct.
 
@@ -84,8 +91,14 @@ incoming tagged IDs keep zero, integers and strings distinct.
 replying and exiting. The default graceful stop budget is six seconds, allowing
 its five-second shutdown budget plus margin. A shorter caller context or explicit
 budget can force teardown sooner. Pre-Init unload refusal is tolerated during
-failed-start cleanup. A Health callback RPC failure is an unhealthy verdict with
-its typed cause retained, rather than a protocol mismatch.
+failed-start cleanup. An authored internal Health failure is unhealthy with its
+RPC cause retained. Invalid request/method/params and malformed Health results
+are protocol failures. SDK rate limits and deadlines return
+`*HealthInconclusiveError`: neither healthy nor unhealthy, never counted toward
+`KillAfterUnhealthy`. They break the supervisor's consecutive failure streak.
+`HealthGate` retries these probes immediately and does not refuse dispatch on
+an inconclusive verdict. The SDK shares 16 execution slots across ordinary calls
+and Health; excess concurrent calls receive typed `rate_limited` failures.
 
 ## Compatibility
 
@@ -116,7 +129,7 @@ The tests start real child processes over the real wire: the test binary re-exec
 CI (`.github/workflows/check.yml`) is the full gate.
 
 Frames default to 8 MiB including LF in both directions. Oversized incoming
-lines are discarded without losing the connection; host-services and hooks offers are refused before spawn. Lifecycle methods send absent or empty params, never null. The
+lines are discarded without losing the connection; host-services and hooks offers are refused before spawn. Lifecycle methods with a deadline send `{"context":{"timeout_ms":N}}`; without a deadline they send absent or empty params, never null. The
 SDK is pinned by pseudo-version until a tagged plugin-sdk release carries protocol 2.
 
 Standalone `Supervise` callers must supply `SuperviseOptions.InitFactory` for

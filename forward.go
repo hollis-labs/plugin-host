@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/hollis-labs/plugin-sdk/subprocess"
@@ -134,21 +134,106 @@ func refreshForwardParams(ctx context.Context, method string, params any) (any, 
 	return fields, err
 }
 
-func (c *Conn) cancelCall(id subprocess.RPCID, cause error) {
+// CancelDropped counts best-effort cancellation controls that could not be
+// published. A dropped control never retires the connection.
+func (c *Conn) CancelDropped() int64 { return c.droppedCancel.Load() }
+
+func (c *Conn) cancelCall(id subprocess.RPCID, cause error) *subprocess.RPCResponse {
 	reason := subprocess.CallerCancelled
 	if errors.Is(cause, context.DeadlineExceeded) {
 		reason = subprocess.DeadlineExpired
 	}
-	// Cancellation uses a fresh bounded write budget, never the canceled call's.
-	// No detached goroutine or retry is created. If control cannot progress, retire
-	// the connection so the peer cannot keep executing under a live transport.
-	ctx, end := context.WithTimeout(context.Background(), cancelWriteTimeout)
-	defer end()
-	err := c.send(ctx, subprocess.RPCRequest{JSONRPC: "2.0", Method: "rpc/cancel", Params: subprocess.CancelParams{
-		RequestOwner: subprocess.HostRPCOwnerHost, ID: id, Reason: reason,
-	}})
+	encoded, err := json.Marshal(subprocess.RPCRequest{JSONRPC: "2.0", Method: "rpc/cancel", Params: subprocess.CancelParams{RequestOwner: subprocess.HostRPCOwnerHost, ID: id, Reason: reason}})
 	if err != nil {
-		c.fail(fmt.Errorf("%w: cancellation control unavailable", ErrGone))
-		_ = c.Close()
+		c.droppedCancel.Add(1)
+		return nil
 	}
+	encoded = append(encoded, '\n')
+	deadlineWriter, ok := c.w.(interface{ SetWriteDeadline(time.Time) error })
+	if !ok || len(encoded) > c.maxFrame {
+		c.droppedCancel.Add(1)
+		return nil
+	}
+	// Never wait behind an ordinary frame or detach a goroutine that could
+	// outlive its caller. Streams without enforceable deadlines are skipped.
+	select {
+	case c.writeGate <- struct{}{}:
+	default:
+		c.droppedCancel.Add(1)
+		return nil
+	}
+	defer func() { <-c.writeGate }()
+	c.mu.Lock()
+	closed := c.closedBy != nil
+	if reply := c.pending[id]; reply != nil {
+		select {
+		case response := <-reply:
+			c.mu.Unlock()
+			return &response
+		default:
+		}
+	}
+	c.mu.Unlock()
+	if closed {
+		c.droppedCancel.Add(1)
+		return nil
+	}
+	if deadlineWriter.SetWriteDeadline(time.Now().Add(cancelWriteTimeout)) != nil {
+		c.droppedCancel.Add(1)
+		return nil
+	}
+	defer func() { _ = deadlineWriter.SetWriteDeadline(time.Time{}) }()
+	if n, err := c.w.Write(encoded); err != nil || n != len(encoded) {
+		c.droppedCancel.Add(1)
+	}
+	return nil
+}
+
+func mustDeadline(ctx context.Context) time.Time { deadline, _ := ctx.Deadline(); return deadline }
+
+// encodeFrame reserves ten bytes for a forward timeout (uint32 plus JSON
+// whitespace). This lets publication update only the budget, without encoding
+// a potentially multi-megabyte opaque payload while holding the writer.
+func encodeFrame(request subprocess.RPCRequest) ([]byte, int, error) {
+	if request.ID == (subprocess.RPCID{}) || !forwardMethod(request.Method) {
+		frame, err := json.Marshal(request)
+		return append(frame, '\n'), -1, err
+	}
+	fields, fc, err := forwardFields(request.Params)
+	if err != nil {
+		return nil, -1, err
+	}
+	if fc == nil {
+		frame, marshalErr := json.Marshal(request)
+		return append(frame, '\n'), -1, marshalErr
+	}
+	delete(fields, "context")
+	payload, err := json.Marshal(fields)
+	if err != nil {
+		return nil, -1, err
+	}
+	request.Params = nil
+	header, err := json.Marshal(request)
+	if err != nil {
+		return nil, -1, err
+	}
+	frame := append(header[:len(header)-1], []byte(`,"params":{"context":{"timeout_ms":`)...)
+	offset := len(frame)
+	frame = append(frame, []byte("          ")...)
+	copy(frame[offset:], strconv.FormatUint(uint64(fc.TimeoutMS), 10))
+	if fc.BindingID != nil {
+		binding, err := json.Marshal(fc.BindingID)
+		if err != nil {
+			return nil, -1, err
+		}
+		frame = append(frame, []byte(`,"binding_id":`)...)
+		frame = append(frame, binding...)
+	}
+	frame = append(frame, '}')
+	if len(payload) > 2 {
+		frame = append(frame, ',')
+		frame = append(frame, payload[1:len(payload)-1]...)
+	}
+	frame = append(frame, []byte("}}\n")...)
+	return frame, offset, nil
 }

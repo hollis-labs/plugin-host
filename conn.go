@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/hollis-labs/plugin-sdk/capability"
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
@@ -46,6 +48,7 @@ type Conn struct {
 	maxFrame       int
 	maxInbound     int
 	droppedInbound atomic.Int64
+	droppedCancel  atomic.Int64
 
 	nextID atomic.Int64
 
@@ -122,9 +125,13 @@ func NewConn(r io.Reader, w io.Writer, opts ...ConnOption) *Conn {
 // Call sends one request and waits for the response with that id.
 //
 // ctx bounds this call and nothing else: canceling it deregisters the waiter
-// and returns ctx's error, and sends a host-owned rpc/cancel control for the published request.
+// and returns ctx's error. A best-effort host-owned rpc/cancel is attempted for
+// a published request, except terminal unload; dropped controls do not close
+// the connection and are counted by [Conn.CancelDropped].
 // Other calls retain their own contexts. A plugin-reported error comes back as
-// *subprocess.RPCError (use [errors.As]); the pipe ending is [ErrGone].
+// *subprocess.RPCError (use [errors.As]); deadline replies additionally match
+// context.DeadlineExceeded via [errors.Is], preserving the RPC effect state.
+// The pipe ending is [ErrGone].
 func (c *Conn) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	if _, ok := ctx.Deadline(); !ok && c.defaultTimeout > 0 {
 		var cancel context.CancelFunc
@@ -166,15 +173,19 @@ func (c *Conn) Call(ctx context.Context, method string, params any) (json.RawMes
 
 	select {
 	case response := <-reply:
-		return finish(method, response)
+		return finish(ctx, method, response)
 	case <-ctx.Done():
 		// A reply already admitted locally wins over a later cancellation.
 		select {
 		case response := <-reply:
-			return finish(method, response)
+			return finish(ctx, method, response)
 		default:
 		}
-		c.cancelCall(id, ctx.Err())
+		if method != subprocess.MethodUnload {
+			if response := c.cancelCall(id, ctx.Err()); response != nil {
+				return finish(ctx, method, *response)
+			}
+		}
 		return nil, fmt.Errorf("pluginhost: %s: %w", method, ctx.Err())
 	case <-c.done:
 		// The reader delivers a frame before it can observe EOF, so a reply
@@ -182,16 +193,22 @@ func (c *Conn) Call(ctx context.Context, method string, params any) (json.RawMes
 		// last frame a plugin wrote before exiting is an answer, not a loss.
 		select {
 		case response := <-reply:
-			return finish(method, response)
+			return finish(ctx, method, response)
 		default:
 		}
 		return nil, fmt.Errorf("pluginhost: %s: %w", method, c.gone())
 	}
 }
 
-func finish(method string, response subprocess.RPCResponse) (json.RawMessage, error) {
+func finish(ctx context.Context, method string, response subprocess.RPCResponse) (json.RawMessage, error) {
 	if response.Error != nil {
-		return nil, fmt.Errorf("pluginhost: %s: %w", method, response.Error)
+		cause := error(response.Error)
+		if ctx.Err() != nil {
+			cause = errors.Join(cause, ctx.Err())
+		} else if code, ok := applicationCode(response.Error); ok && code == capability.DeadlineExceeded {
+			cause = errors.Join(cause, context.DeadlineExceeded)
+		}
+		return nil, fmt.Errorf("pluginhost: %s: %w", method, cause)
 	}
 	return response.Result, nil
 }
@@ -256,11 +273,10 @@ func closeIf(v any) error {
 // whose reader has gone (or that this side closed), and a partial frame
 // leaves the stream unusable either way, so the connection is failed too.
 func (c *Conn) send(ctx context.Context, request subprocess.RPCRequest) error {
-	encoded, err := json.Marshal(request)
+	encoded, budget, err := encodeFrame(request)
 	if err != nil {
 		return fmt.Errorf("encode request: %w", err)
 	}
-	encoded = append(encoded, '\n')
 	if len(encoded) > c.maxFrame {
 		return fmt.Errorf("%w: %d bytes, cap %d", ErrFrameTooLarge, len(encoded), c.maxFrame)
 	}
@@ -276,18 +292,20 @@ func (c *Conn) send(ctx context.Context, request subprocess.RPCRequest) error {
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	// Recompute the remaining wire budget after waiting for the writer.
-	request.Params, err = refreshForwardParams(ctx, request.Method, request.Params)
-	if err != nil {
-		return err
-	}
-	encoded, err = json.Marshal(request)
-	if err != nil {
-		return err
-	}
-	encoded = append(encoded, '\n')
-	if len(encoded) > c.maxFrame {
-		return ErrFrameTooLarge
+	// Only a fixed-width numeric slot changes at publication; opaque payload
+	// encoding and allocation have already completed outside the writer.
+	if budget >= 0 {
+		remaining := time.Until(mustDeadline(ctx)).Milliseconds()
+		if remaining <= 0 {
+			return context.DeadlineExceeded
+		}
+		if remaining > int64(^uint32(0)) {
+			remaining = int64(^uint32(0))
+		}
+		for i := range 10 {
+			encoded[budget+i] = ' '
+		}
+		copy(encoded[budget:budget+10], strconv.FormatInt(remaining, 10))
 	}
 	c.mu.Lock()
 	closed := c.closedBy

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -31,8 +32,11 @@ type peer struct {
 
 func newPeer(t *testing.T, opts ...ConnOption) *peer {
 	t.Helper()
-	fromConnR, fromConnW := io.Pipe() // Conn -> peer
-	toConnR, toConnW := io.Pipe()     // peer -> Conn
+	fromConnR, fromConnW, err := os.Pipe() // Conn -> peer, deadline-capable writer
+	if err != nil {
+		t.Fatal(err)
+	}
+	toConnR, toConnW := io.Pipe() // peer -> Conn
 	p := &peer{t: t, reqs: make(chan subprocess.RPCRequest, 64), toConn: toConnW}
 	p.conn = NewConn(toConnR, fromConnW, opts...)
 	go func() {

@@ -14,6 +14,8 @@ const defaultHealthTTL = time.Second
 
 // HealthVerdict is one plugin/health outcome.
 type HealthVerdict struct {
+	// Inconclusive reports a busy or expired probe; it is not cached as unhealthy.
+	Inconclusive bool
 	// OK is the plugin's own answer.
 	OK bool
 	// Message is the plugin's message, or the probe error's text when the
@@ -31,7 +33,8 @@ type HealthVerdict struct {
 // HealthGate is an on-demand health check with a cached verdict (Tangent's
 // design): nothing runs in the background, [HealthGate.Probe] asks the
 // plugin and caches the answer for the TTL, and [HealthGate.Check] refuses on
-// the last cached verdict without a round trip. Dispatch paths call Check;
+// the last cached verdict without a round trip. Inconclusive probes are not
+// cached for the TTL and do not refuse dispatch. Dispatch paths call Check;
 // only an explicit probe advances the verdict, so an unhealthy plugin can
 // always be probed back to healthy.
 //
@@ -63,7 +66,7 @@ func NewHealthGate(probe func(context.Context) (subprocess.HealthResult, error),
 // one plugin/health, which is bounded and cheaper than serializing them.
 func (g *HealthGate) Probe(ctx context.Context) HealthVerdict {
 	g.mu.Lock()
-	if g.ttl > 0 && !g.last.Checked.IsZero() && g.now().Sub(g.last.Checked) < g.ttl {
+	if g.ttl > 0 && !g.last.Inconclusive && !g.last.Checked.IsZero() && g.now().Sub(g.last.Checked) < g.ttl {
 		cached := g.last
 		g.mu.Unlock()
 		return cached
@@ -74,7 +77,7 @@ func (g *HealthGate) Probe(ctx context.Context) HealthVerdict {
 	result, err := g.probe(ctx)
 	if err != nil {
 		var rpcErr *subprocess.RPCError
-		verdict = HealthVerdict{Message: err.Error(), Reachable: errors.As(err, &rpcErr)}
+		verdict = HealthVerdict{Message: err.Error(), Reachable: errors.As(err, &rpcErr), Inconclusive: errors.Is(err, ErrHealthInconclusive)}
 	} else {
 		verdict = HealthVerdict{OK: result.OK, Message: result.Message, Reachable: true}
 	}
@@ -94,7 +97,7 @@ func (g *HealthGate) Check() error {
 	g.mu.Lock()
 	last := g.last
 	g.mu.Unlock()
-	if last.Checked.IsZero() || last.OK {
+	if last.Checked.IsZero() || last.OK || last.Inconclusive {
 		return nil
 	}
 	if !last.Reachable {

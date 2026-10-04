@@ -40,7 +40,16 @@ refuses a tag whose CHANGELOG has no heading for it.
 - Unload is terminal and invokes cleanup once; default graceful stop allows six
   seconds for the SDK's five-second shutdown budget plus margin. Failed-start
   pre-Init unload refusal does not mark teardown incomplete.
-- Health RPC failures are unhealthy verdicts with typed causes retained.
+- Health maps authored internal failures to unhealthy, malformed/protocol failures
+  to protocol mismatch, and SDK rate limits/deadlines to typed inconclusive
+  probes. Inconclusive probes are retried by HealthGate and never trigger health
+  kills. The SDK shares 16 execution slots; excess calls receive rate_limited.
+- Deadline responses preserve their typed RPC cause/effect state and also match
+  context.DeadlineExceeded. Caller cancellation controls are best effort, bounded,
+  counted when dropped, and never retire the connection. Terminal unload sends
+  no cancellation control. Notifications acquire no implicit forward deadline.
+- Payload encoding precedes writer acquisition; remaining timeout is updated at
+  publication without re-encoding opaque payloads under the writer.
 - Optional hooks and reverse offers remain refused; duplex activation is deferred.
 
 
@@ -49,7 +58,7 @@ refuses a tag whose CHANGELOG has no heading for it.
   a generation. Explicit ExpectedID must match incarnation.owner_id.
 - Pin protocol 2 to the SDK pseudo-version until a tagged plugin-sdk release carries protocol 2.
 - Default frames are 8 MiB including LF in both directions; profile offers
-  are refused until host services and hooks are implemented. Lifecycle methods omit params or send {}.
+  are refused until host services and hooks are implemented. Lifecycle methods with deadlines send a context object with remaining timeout_ms; otherwise params are absent or empty, never null.
 
 - Cooperative cancellation receives a bounded grace before pending quarantine;
   reload preflight timeouts preserve the serving generation and failure status.

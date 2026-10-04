@@ -74,12 +74,32 @@ func (c *Client) Unload(ctx context.Context) error {
 // HealthChecker answers {ok:true}, so "healthy" and "never implemented" are
 // indistinguishable here.
 func (c *Client) Health(ctx context.Context) (subprocess.HealthResult, error) {
-	result, err := Call[subprocess.HealthResult](ctx, c.conn, subprocess.MethodHealth, nil)
-	var rpcErr *subprocess.RPCError
-	if errors.As(err, &rpcErr) {
-		return result, errors.Join(ErrUnhealthy, err)
+	raw, err := c.conn.Call(ctx, subprocess.MethodHealth, nil)
+	if err != nil {
+		return subprocess.HealthResult{}, healthError(err)
 	}
-	return result, err
+	// Health has a closed result shape and a required boolean; absent/null ok
+	// must not silently decode into an authored unhealthy answer.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return subprocess.HealthResult{}, ErrProtocolMismatch
+	}
+	for key := range fields {
+		if key != "ok" && key != "message" {
+			return subprocess.HealthResult{}, ErrProtocolMismatch
+		}
+	}
+	if string(fields["ok"]) != "true" && string(fields["ok"]) != "false" {
+		return subprocess.HealthResult{}, ErrProtocolMismatch
+	}
+	if message, present := fields["message"]; present && string(message) == "null" {
+		return subprocess.HealthResult{}, ErrProtocolMismatch
+	}
+	var result subprocess.HealthResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return result, errors.Join(ErrProtocolMismatch, err)
+	}
+	return result, nil
 }
 
 // CommandExecute sends command/execute.

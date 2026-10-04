@@ -305,6 +305,24 @@ func (p *echoPlugin) MCPCallTool(ctx context.Context, req subprocess.MCPCallRequ
 	case "echo":
 		msg, _ := req.Arguments["message"].(string)
 		out = map[string]any{"echo": msg}
+	case "hold":
+		marker, _ := req.Arguments["entered"].(string)
+		release, _ := req.Arguments["release"].(string)
+		if err := os.WriteFile(marker, []byte("entered"), 0600); err != nil {
+			return subprocess.MCPCallResult{}, err
+		}
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return subprocess.MCPCallResult{}, ctx.Err()
+			case <-ticker.C:
+				if _, err := os.Stat(release); err == nil {
+					return subprocess.MCPCallResult{Content: json.RawMessage(`true`)}, nil
+				}
+			}
+		}
 	case "sleep":
 		select {
 		case <-time.After(time.Duration(arg("ms")) * time.Millisecond):
