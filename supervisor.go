@@ -372,13 +372,20 @@ func (s *Supervisor) watch(p *Process) bool {
 			bad++
 			if s.opts.KillAfterUnhealthy > 0 && bad >= s.opts.KillAfterUnhealthy {
 				s.mu.Lock()
-				s.healthKilled = p
-				s.healthFailure = err
-				if err == nil {
-					s.healthFailure = ErrUnhealthy
+				// The first kill decision owns its cause. A later probe may
+				// observe only ErrGone after the process has been killed.
+				if s.healthKilled != p {
+					s.healthKilled = p
+					s.healthFailure = err
+					if err == nil {
+						s.healthFailure = ErrUnhealthy
+					}
 				}
 				s.mu.Unlock()
 				_ = p.Kill()
+				// Wait only for exit or host stop now. A buffered ticker event
+				// must not launch another health probe against the killed child.
+				tick = nil
 			}
 		}
 	}

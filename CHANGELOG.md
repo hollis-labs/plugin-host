@@ -11,6 +11,9 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Fixed
 
+- Supervisor retains the first health-kill cause and stops health polling after
+  killing a child; a buffered probe cannot replace a timeout with ErrGone.
+
 - Truncated stderr tails discard their possibly partial leading line only when
   non-blank text remains after the first LF, before secret and host redaction.
   Re-apply this rule after a final byte trim if secret redaction grows the text.
