@@ -77,7 +77,7 @@ func (c *terminalCredit) release() {
 }
 
 func (q *frameQueue) appendFrame(lane writerLane, wire []byte) *queuedFrame {
-	frame := &queuedFrame{wire: append([]byte(nil), wire...)}
+	frame := &queuedFrame{wire: wire}
 	l := &q.lanes[lane]
 	l.frames = append(l.frames, frame)
 	l.bytes += len(wire)
@@ -85,6 +85,12 @@ func (q *frameQueue) appendFrame(lane writerLane, wire []byte) *queuedFrame {
 }
 
 func (q *frameQueue) enqueue(lane writerLane, wire []byte) (*queuedFrame, error) {
+	return q.enqueueOwned(lane, append([]byte(nil), wire...))
+}
+
+// enqueueOwned transfers an already encoded immutable frame without copying
+// under connection or queue locks. The caller must not retain mutable ownership.
+func (q *frameQueue) enqueueOwned(lane writerLane, wire []byte) (*queuedFrame, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.closed {
@@ -99,6 +105,8 @@ func (q *frameQueue) enqueue(lane writerLane, wire []byte) (*queuedFrame, error)
 // terminal publishes success if it fits, otherwise the caller's bounded typed
 // fallback. The caller authors its known effect classification before this seam.
 func (c *terminalCredit) terminal(success, fallback []byte) (*queuedFrame, error) {
+	success = append([]byte(nil), success...)
+	fallback = append([]byte(nil), fallback...)
 	q := c.queue
 	q.mu.Lock()
 	defer q.mu.Unlock()

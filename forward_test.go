@@ -13,14 +13,14 @@ import (
 func TestTaggedReplyIDsKeepZeroAndStringsDistinct(t *testing.T) {
 	p := newPeer(t)
 	for _, id := range []subprocess.RPCID{subprocess.NumberID(0), subprocess.StringID("0"), subprocess.StringID("job-A")} {
-		reply := make(chan subprocess.RPCResponse, 1)
+		reply := make(chan callReply, 1)
 		p.conn.mu.Lock()
-		p.conn.pending[id] = reply
+		p.conn.pending[id] = &pendingCall{reply: reply}
 		p.conn.mu.Unlock()
 		p.reply(id, `true`)
 		select {
 		case r := <-reply:
-			if r.ID != id || string(r.Result) != "true" {
+			if r.response.ID != id || string(r.response.Result) != "true" {
 				t.Fatal(r)
 			}
 		case <-time.After(testWait):
@@ -44,7 +44,9 @@ func TestOutboundIDsRefuseExhaustionWithoutWrapping(t *testing.T) {
 	if got := await(t, call); got.err != nil {
 		t.Fatal(got.err)
 	}
-	if _, err := p.conn.Call(context.Background(), "exhausted", nil); !errors.Is(err, ErrRequestIDExhausted) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := p.conn.Call(ctx, "exhausted", nil); !errors.Is(err, ErrRequestIDExhausted) {
 		t.Fatal(err)
 	}
 	select {

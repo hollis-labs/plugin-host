@@ -22,7 +22,7 @@ import (
 
 // fake child: records every stdin line, answers init with $RESULT (raw JSON
 // for the "result" member, or a full raw line when RAWLINE=1), answers every
-// later request with {} under the same id.
+// later request with its method-specific lifecycle result under the same id.
 const scriptedInitChild = `echo $$ > "$DIR/pid"
 IFS= read -r line || exit 0
 printf '%s\n' "$line" >> "$DIR/lines"
@@ -30,7 +30,9 @@ if [ "$RAWLINE" = "1" ]; then printf '%s\n' "$RESULT"; else printf '{"jsonrpc":"
 while IFS= read -r l; do
   printf '%s\n' "$l" >> "$DIR/lines"
   id=$(printf '%s' "$l" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
-  if [ -n "$id" ]; then printf '{"jsonrpc":"2.0","id":%s,"result":{"ok":true}}\n' "$id"; fi
+  result='{}'
+  case "$l" in *plugin/health*|*plugin/unload*) result='{"ok":true}' ;; esac
+  if [ -n "$id" ]; then printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result"; fi
 done
 `
 

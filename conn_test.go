@@ -293,9 +293,9 @@ func TestConnRefusesAnOversizedRequestAndWritesNothing(t *testing.T) {
 	if r.Method != "small" {
 		t.Fatalf("first frame the peer saw was %q; the oversized one was written", r.Method)
 	}
-	if r.ID != subprocess.NumberID(2) {
-		// The refused call consumed id 1; ids stay monotonic and unique.
-		t.Fatalf("id = %v, want 2", r.ID)
+	if r.ID != subprocess.NumberID(1) {
+		// Refusal before publication consumes no ID.
+		t.Fatalf("id = %v, want 1", r.ID)
 	}
 	p.reply(r.ID, `1`)
 	if got := await(t, ch); got.err != nil {
@@ -335,7 +335,7 @@ func TestConnCloseFailsWaitersAndIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestCallDecodesAndZeroesAnEmptyResult(t *testing.T) {
+func TestCallDecodesAndZeroesANullResult(t *testing.T) {
 	p := newPeer(t)
 	type out struct{ N int }
 	ch := make(chan out, 1)
@@ -359,7 +359,7 @@ func TestCallDecodesAndZeroesAnEmptyResult(t *testing.T) {
 		ch <- v
 	}()
 	r = p.request()
-	p.raw(`{"jsonrpc":"2.0","id":` + itoa(r.ID) + `}`)
+	p.reply(r.ID, `null`)
 	if v := <-ch; v.N != 0 {
 		t.Fatalf("N = %d", v.N)
 	}
@@ -455,7 +455,11 @@ func TestLifecycleCallsDoNotEncodeNullParams(t *testing.T) {
 		}
 		requests <- fields
 		response := append([]byte(`{"jsonrpc":"2.0","id":`), fields["id"]...)
-		response = append(response, []byte(`,"result":{"ok":true}}`+"\n")...)
+		result := `{"ok":true}`
+		if string(fields["method"]) == `"plugin/load"` {
+			result = `{}`
+		}
+		response = append(response, []byte(`,"result":`+result+"}\n")...)
 		if _, err := reply.Write(response); err != nil {
 			return 0, err
 		}
