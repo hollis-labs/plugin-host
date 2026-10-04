@@ -90,8 +90,13 @@ invented parent or terminal credit. Underlying byte count/error, subsequent ACK
 error, actual writer completion and genuine reverse retirement are distinct.
 Full bytes followed by a failed ACK remain full physical publication with
 uncertain outcome and harness failure. EOF accepts the authored unknown controls
-only through their complete pre-owned receipts; all other notifications,
-leftovers and observer/control failures retain the strict guards. Natural
+only through their complete pre-owned receipts. This selected fairness scenario
+authors no additional host cancellation: even a live or completed published
+target cannot authorize a control without its per-run intent and physical
+receipt. Other scenarios keep their caller/observer/descendant cancellation
+guards. Snapshot `HighWater` describes the base/refusal stream, not the
+negotiated reverse stream. Other notifications, leftovers and observer/control
+failures retain the strict guards. Natural
 worker/bridge cleanup and reap remain required. This test-only seam expands no
 public API or lifecycle policy; raw forward/credits and the original remaining
 mandatory ledger stay open.

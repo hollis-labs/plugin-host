@@ -99,9 +99,10 @@ func (s *interopPrivateStore) add(v any) error {
 
 // Conn -> queue, then separately Conn -> session. Never triple nesting.
 type interopAdmissionSnapshot struct {
-	Ref                                                                                        interopScenarioRef
-	Ordinary, Lifecycle, Pending, Inbound                                                      int
-	IDs                                                                                        []subprocess.RPCID
+	Ref                                   interopScenarioRef
+	Ordinary, Lifecycle, Pending, Inbound int
+	IDs                                   []subprocess.RPCID
+	// HighWater records the base/refusal stream, not negotiated reverse.high.
 	HighWater                                                                                  int64
 	OrdinaryFrames, OrdinaryBytes, ControlFrames, ControlBytes, Reserved, ReservedBytes, Burst int
 	Active, OrdinaryEligible                                                                   bool

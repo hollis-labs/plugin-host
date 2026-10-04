@@ -192,6 +192,11 @@ func (p *interopPrivatePlan) guard(events []map[string]json.RawMessage, writes [
 				consumed++
 				continue
 			}
+			// This selected scenario authors only the pre-owned refill controls.
+			// A known live or completed request does not create a further intent,
+			// driver cause or physical receipt. Other scenarios retain their own
+			// caller/observer/descendant cancellation validation.
+			return nil, errors.New("private EOF unowned host control")
 		}
 		filtered = append(filtered, event)
 	}
@@ -339,6 +344,42 @@ func auditInteropPrivateEOF(t *testing.T, c *interopControls) {
 	duplicate := append(append([]map[string]json.RawMessage(nil), c.observed...), owned)
 	if err := check(c.privatePlan, duplicate, c.privateWrites); err == nil {
 		t.Fatal("extra identical control accepted")
+	}
+	// A real directional request is a correlation witness, not an authored
+	// cancellation intent. Check both a live-position insertion and post-terminal
+	// traffic using the actual published Health ID, never a fixed fixture ID.
+	healthIndex := -1
+	var healthID uint64
+	for i, event := range c.observed {
+		if rawEventString(event, "kind") == "wire" && rawEventString(event, "direction") == "host-to-worker" && rawEventString(event, "frame_type") == "request" && rawEventString(event, "method") == subprocess.MethodHealth {
+			healthIndex = i
+			if err := json.Unmarshal(event["id"], &healthID); err != nil || healthID == 0 {
+				t.Fatal("actual Health correlation absent", err)
+			}
+			break
+		}
+	}
+	if healthIndex < 0 {
+		t.Fatal("actual Health request absent")
+	}
+	for _, reason := range []subprocess.CancelReason{subprocess.CallerCancelled, subprocess.DeadlineExpired} {
+		raw, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "rpc/cancel", "params": map[string]any{"request_owner": "host", "id": healthID, "reason": reason}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(string(append(raw, '\n')))
+		if err != nil {
+			t.Fatal(err)
+		}
+		extra := map[string]json.RawMessage{"kind": json.RawMessage(`"wire"`), "direction": json.RawMessage(`"host-to-worker"`), "frame_type": json.RawMessage(`"notification"`), "raw": encoded}
+		for _, at := range []int{healthIndex + 1, len(c.observed)} {
+			events := append([]map[string]json.RawMessage(nil), c.observed[:at]...)
+			events = append(events, extra)
+			events = append(events, c.observed[at:]...)
+			if err := check(c.privatePlan, events, c.privateWrites); err == nil {
+				t.Fatal("known directional target accepted unowned control", reason, at)
+			}
+		}
 	}
 	unexpected := map[string]json.RawMessage{"kind": json.RawMessage(`"wire"`), "direction": json.RawMessage(`"worker-to-host"`), "frame_type": json.RawMessage(`"notification"`), "raw": json.RawMessage(`"{\"jsonrpc\":\"2.0\",\"method\":\"host/unadvertised\",\"params\":{}}\n"`)}
 	if err := check(c.privatePlan, append(append([]map[string]json.RawMessage(nil), c.observed...), unexpected), c.privateWrites); err == nil {
