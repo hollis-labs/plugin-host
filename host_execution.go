@@ -115,6 +115,7 @@ func (s *HostSession) executeHost(ctx context.Context, id uint64, method HostMet
 			delete(s.active, id)
 		}()
 		result, err := s.invokeHost(callCtx, call, method, raw)
+		backendSucceeded := err == nil
 		if err == nil {
 			err = validateHostResult(method, raw, result)
 			if err == nil {
@@ -122,7 +123,7 @@ func (s *HostSession) executeHost(ctx context.Context, id uint64, method HostMet
 				err = s.charge(authority, uint64(len(encoded)), 0, 0)
 			}
 		}
-		if err != nil && effectfulMethod(method) && call.started.Load() && result != nil {
+		if backendSucceeded && err != nil && effectfulMethod(method) && call.started.Load() && result != nil {
 			// A valid backend result that cannot be validated/charged/published is not
 			// a definite pre-effect refusal. The service's receipt remains authoritative.
 			err = &capability.Error{Code: capability.UnknownOutcome, EffectState: capability.Unknown}

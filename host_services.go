@@ -124,6 +124,9 @@ func (c *HostCall) CheckCommit() error {
 	if err := c.session.policy(c.ctx, c.Authority()); err != nil {
 		return err
 	}
+	if err := c.ctx.Err(); err != nil {
+		return hostContextError(err)
+	}
 	return c.session.checkAuthority(c.authority)
 }
 func (c *HostCall) Charge(bytes, effects, tokens uint64) error {
