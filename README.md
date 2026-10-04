@@ -236,10 +236,16 @@ workers without running policy/backends; terminal metadata and credits transfer
 to the writer before queue visibility and remain owned until physical outcome.
 
 Focused normal-Serve Go/Node child tests build source
-`90adf1f02ddffde708fa3784f0063bab5171462b` (base
+`ea8ec0dca862d0c7284cc6a130a4b27fb812ed21` (base
 `d04ab2149506a96e8c54b58829f58ee480e0de41`) separately from the module pin.
 Their private fd3 bridge uses bounded preseeded releases and actual Spawn/Conn/
 cancel/Stop/Lifecycle paths. These tests are separate from manifest replay:
-shared Go/Node/Deno obligations and receipts stay pending until the real adapter
-runs them. Hook clients/composition remain unavailable pending SDK per-item
+[isolated manifest adapter](scripts/interop-scaffold.md) records genuine
+Go/Node/Deno finite-parent subset receipts separately from its complete pending
+inventory. The FULL authored `arrival-deadline-and-absent-context` case remains
+source-available, host-unsupported and PENDING/incompatible: this host requires
+finite parents and couples local/wire budgets. Its raw no-context rejection is
+local before publication, with no child command wire or backend execution.
+These subset receipts establish no full 0189/0172 gate or unqualified profile
+conformance. Hook clients/composition remain unavailable pending SDK per-item
 scope support. No consumer activation or release follows from these tests.

@@ -32,6 +32,14 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Added
 
+- Isolated manifest-selected Go/Node/Deno interop adapter with bounded sequenced
+  controls, physical wire/backend/exit receipts and authored proposal ownership.
+  Exact test fixture source `ea8ec0d` is separate from the unchanged module pin.
+  Acceptance covers the finite-parent implemented subset only. FULL authored
+  `arrival-deadline-and-absent-context` remains source-available, host-unsupported
+  and PENDING/incompatible; no full 0189/0172 gate, unqualified profile conformance
+  or release follows. See `scripts/interop-scaffold.md` for the named limitation.
+
 - Explicit optional `ReverseProfile` negotiation, closed typed reverse dispatch,
   prepared host binding attachment at actual writer-selected IDs, immediate
   parent retirement, lifecycle/connection fencing and separate finite log-only

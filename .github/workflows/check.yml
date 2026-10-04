@@ -11,6 +11,10 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      GOMAXPROCS: 4
+      GOFLAGS: -p=2
+      GOWORK: off
     steps:
       - uses: actions/checkout@v5
 
@@ -59,18 +63,41 @@ jobs:
         with:
           node-version: 22
 
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.7
+
       # Test-only normal-Serve fixture source; not the module dependency pin.
       - name: pinned SDK negotiated child
         run: |
-          fixture="$RUNNER_TEMP/plugin-sdk-fixture"
+          pin=ea8ec0dca862d0c7284cc6a130a4b27fb812ed21
+          assets="$RUNNER_TEMP/plugin-host-interop-$pin"
+          mkdir -p "$assets"
+          fixture="$assets/source"
           git init "$fixture"
           git -C "$fixture" remote add origin https://github.com/hollis-labs/plugin-sdk.git
-          git -C "$fixture" fetch --depth=1 origin 90adf1f02ddffde708fa3784f0063bab5171462b
+          git -C "$fixture" fetch --depth=1 origin $pin
           git -C "$fixture" checkout --detach FETCH_HEAD
-          test "$(git -C "$fixture" rev-parse HEAD)" = 90adf1f02ddffde708fa3784f0063bab5171462b
-          (cd "$fixture" && GOWORK=off go test -p 2 -race -c ./subprocess -o "$RUNNER_TEMP/sdk-negotiated-child")
+          test "$(git -C "$fixture" rev-parse HEAD)" = $pin
+          (cd "$fixture" && GOWORK=off go test -p 2 -race -c ./subprocess -o "$assets/duplex-child")
           (cd "$fixture/ts" && npm ci --ignore-scripts && npm run build)
-          echo "REVERSE_GO_CHILD=$RUNNER_TEMP/sdk-negotiated-child" >> "$GITHUB_ENV"
+          printf '%s\n' "$pin" > "$fixture/.interop-source-commit"
+          test "$(sha256sum "$fixture/protocol/v2/fixtures/duplex-child.json" | cut -d' ' -f1)" = 30cb07b87060dc88e9cb6ac5414f7b9cb7bb19c7a97c058e284d96e1e59ff4a9
+          printf '%s\n' "$pin|$(go version)|GOMAXPROCS=4|GOFLAGS=-p=2|race=true" > "$assets/build-receipt"
+          printf '%s\n' "$pin|$(node --version)|$(npm --version)|npm-ci-ignore-scripts|workspace-build" > "$assets/ts-build-receipt"
+          echo "INTEROP_SDK_SOURCE=$fixture" >> "$GITHUB_ENV"
+          echo "INTEROP_GO_CHILD=$assets/duplex-child" >> "$GITHUB_ENV"
+          echo "INTEROP_HOST_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "INTEROP_HOST_DIRTY=false" >> "$GITHUB_ENV"
+          echo "INTEROP_SDK_BASE=d04ab2149506a96e8c54b58829f58ee480e0de41" >> "$GITHUB_ENV"
+          echo "INTEROP_INVENTORY_REPORT=$assets/report.json" >> "$GITHUB_ENV"
+          echo "INTEROP_REPORT=$assets/replay-report.json" >> "$GITHUB_ENV"
+          echo "INTEROP_CONTROL_REPORT=$assets/control-report.json" >> "$GITHUB_ENV"
+          echo "INTEROP_RECEIVED_REPORT=$assets/received-budget-report.json" >> "$GITHUB_ENV"
+          echo "INTEROP_GO_VERSION=$(go version)" >> "$GITHUB_ENV"
+          echo "INTEROP_NODE_VERSION=$(node --version)" >> "$GITHUB_ENV"
+          echo "INTEROP_DENO_VERSION=$(deno --version | head -1)" >> "$GITHUB_ENV"
+          echo "REVERSE_GO_CHILD=$assets/duplex-child" >> "$GITHUB_ENV"
           echo "REVERSE_NODE_WORKER=$fixture/ts/packages/plugin-sdk/test/negotiated-worker.js" >> "$GITHUB_ENV"
 
       - name: go test -race
@@ -80,3 +107,16 @@ jobs:
       # commit. v1.8.0 declares `go 1.26.0`.
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+      - name: interop receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finite-parent-interop-receipts
+          path: |
+            ${{ runner.temp }}/plugin-host-interop-*/report.json
+            ${{ runner.temp }}/plugin-host-interop-*/control-report.json
+            ${{ runner.temp }}/plugin-host-interop-*/replay-report.json
+            ${{ runner.temp }}/plugin-host-interop-*/received-budget-report.json
+            ${{ runner.temp }}/plugin-host-interop-*/build-receipt
+            ${{ runner.temp }}/plugin-host-interop-*/ts-build-receipt

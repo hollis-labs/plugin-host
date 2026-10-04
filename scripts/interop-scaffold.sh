@@ -3,7 +3,7 @@
 set -euo pipefail
 : "${TMPDIR:?team scratch directory must be set}"
 : "${INTEROP_SDK_REPO:?set to the local plugin-sdk Git checkout}"
-pin=90adf1f02ddffde708fa3784f0063bab5171462b
+pin=ea8ec0dca862d0c7284cc6a130a4b27fb812ed21
 base_pin=d04ab2149506a96e8c54b58829f58ee480e0de41
 host_root=$(git rev-parse --show-toplevel)
 scratch="$TMPDIR/plugin-host-interop-$pin"
@@ -33,7 +33,7 @@ cd "$host_root"
 INTEROP_SDK_SOURCE="$source_dir" INTEROP_GO_CHILD="$child" \
 INTEROP_HOST_COMMIT=$(git rev-parse HEAD) \
 INTEROP_HOST_DIRTY=$(if [[ -n $(git status --porcelain) ]]; then printf true; else printf false; fi) \
-INTEROP_SDK_BASE="$base_pin" INTEROP_REPORT="$scratch/report.json" \
+INTEROP_SDK_BASE="$base_pin" INTEROP_INVENTORY_REPORT="$scratch/report.json" \
 GOWORK=off GOMAXPROCS=4 GOFLAGS=-p=2 \
 heavytest go test -p 2 ./pluginhosttest -run '^TestSDKInteropScaffold$' -v
 printf 'Scaffold report: %s\n' "$scratch/report.json"
