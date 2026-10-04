@@ -55,6 +55,24 @@ jobs:
         with:
           version: v2.11.4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Test-only normal-Serve fixture source; not the module dependency pin.
+      - name: pinned SDK negotiated child
+        run: |
+          fixture="$RUNNER_TEMP/plugin-sdk-fixture"
+          git init "$fixture"
+          git -C "$fixture" remote add origin https://github.com/hollis-labs/plugin-sdk.git
+          git -C "$fixture" fetch --depth=1 origin 90adf1f02ddffde708fa3784f0063bab5171462b
+          git -C "$fixture" checkout --detach FETCH_HEAD
+          test "$(git -C "$fixture" rev-parse HEAD)" = 90adf1f02ddffde708fa3784f0063bab5171462b
+          (cd "$fixture" && GOWORK=off go test -p 2 -race -c ./subprocess -o "$RUNNER_TEMP/sdk-negotiated-child")
+          (cd "$fixture/ts" && npm ci --ignore-scripts && npm run build)
+          echo "REVERSE_GO_CHILD=$RUNNER_TEMP/sdk-negotiated-child" >> "$GITHUB_ENV"
+          echo "REVERSE_NODE_WORKER=$fixture/ts/packages/plugin-sdk/test/negotiated-worker.js" >> "$GITHUB_ENV"
+
       - name: go test -race
         run: go test -race -count=1 ./...
 

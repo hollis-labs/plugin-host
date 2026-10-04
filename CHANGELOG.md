@@ -28,6 +28,15 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Added
 
+- Explicit optional `ReverseProfile` negotiation, closed typed reverse dispatch,
+  prepared host binding attachment at actual writer-selected IDs, immediate
+  parent retirement, lifecycle/connection fencing and separate finite log-only
+  Unload authority. Default nil keeps offer refusal; hooks remain refused.
+  Bounded terminal receipts remain writer-owned through physical outcome.
+  Unsupported smaller fixed admission/byte/depth floors refuse, while positive
+  write ceilings narrow (including 1000ms). Pinned Go/Node normal-Serve child
+  regressions are separate from pending shared manifest replay/interop gates.
+
 - `Supervisor.Status`, `SupervisorStatus`, and shared `ExitStatus` expose typed
   restart exhaustion, terminal failure and the last reaped child's owner, exit
   information and bounded stderr tail. `LifecycleStatus.LastExit` retains the
@@ -36,10 +45,10 @@ refuses a tag whose CHANGELOG has no heading for it.
   Status summaries surface restart exhaustion and exit code/signal. Document
   host responsibility for children orphaned after host death without unload.
 
-- Add a dormant typed host-service seam, authenticated bounded binding ledger,
-  narrow renewal, shared execution budgets and cancellation/fencing. Reverse
-  offers remain refused; negotiated transport/lifecycle hookup and child replay
-  are subsequent gates (CW-20261003-0189 slice 3).
+- Add a typed host-service seam, authenticated bounded binding ledger,
+  narrow renewal, shared execution budgets and cancellation/fencing (slice 3).
+  Explicit negotiated transport/lifecycle hookup is described above; shared
+  manifest replay remains a separate gate.
 
 - Publication-ordered positive JS-safe IDs, strict direction-aware reply
   demultiplexing and pending-method result validation. Pending correlation is

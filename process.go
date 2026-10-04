@@ -27,8 +27,8 @@ const drainGrace = 250 * time.Millisecond
 // [Process.Stop] is the graceful path: plugin/unload, then close the child's
 // stdin, then wait, then SIGKILL the whole process group. The unload reply is terminal: SDK Serve
 // drains and cleans up once before writing it and exiting. Closing stdin also
-// ends a failed or unresponsive connection. The kernel is the backstop: if the
-// host dies, the plugin's pipes close and the plugin reaps itself.
+// ends a failed or unresponsive connection. A host that dies without unloading
+// must arrange OS/process supervision for a plugin that ignores closed stdin.
 //
 // # What a Process never does
 //
@@ -116,7 +116,11 @@ func Spawn(ctx context.Context, s Spec) (*Process, error) {
 		return nil, fmt.Errorf("pluginhost: %s: spawn %s: %w", s.label(), s.Command, startErr)
 	}
 
-	conn := NewConn(stdoutR, stdinW, s.ConnOptions...)
+	options := slices.Clone(s.ConnOptions)
+	if s.Reverse != nil {
+		options = append(options, WithReverseProfile(*s.Reverse, s.Init))
+	}
+	conn := NewConn(stdoutR, stdinW, options...)
 	p := &Process{
 		spec: s, cmd: cmd, conn: conn, client: NewClient(conn), tail: tail,
 		stdin: stdinW, stdoutR: stdoutR,
@@ -143,6 +147,10 @@ func Start(ctx context.Context, s Spec) (*Process, error) {
 	if _, _, err := p.Handshake(ctx); err != nil {
 		return nil, err
 	}
+	if err := p.conn.ActivateHostServices(); err != nil {
+		_ = p.Kill()
+		return nil, err
+	}
 	return p, nil
 }
 
@@ -153,6 +161,7 @@ func (p *Process) wait() {
 	p.mu.Lock()
 	p.exit, p.done = info, true
 	p.mu.Unlock()
+	p.conn.RevokeHostServices()
 	close(p.exited)
 
 	// Let the reader finish what the plugin wrote before it died (a plugin
@@ -214,8 +223,14 @@ func (p *Process) initialize(ctx context.Context) (subprocess.InitResult, error)
 }
 
 func (p *Process) verify(result subprocess.InitResult) error {
-	if err := verifyInitResult(p.spec.Init, result); err != nil {
-		return initFailure(p.spec, err)
+	var contractError error
+	if p.conn == nil {
+		contractError = verifyInitResult(p.spec.Init, result)
+	} else {
+		contractError = p.conn.verifyInit(p.spec.Init, result)
+	}
+	if contractError != nil {
+		return initFailure(p.spec, contractError)
 	}
 	if result.Protocol != subprocess.ProtocolVersion {
 		return processFailure(p.spec, "protocol", fmt.Errorf("%w: plugin speaks %d, host speaks %d", ErrProtocolMismatch, result.Protocol, subprocess.ProtocolVersion))
@@ -307,6 +322,7 @@ func (p *Process) diagnosticsText() string {
 // Spec.ReapTimeout for the process to be reaped. It does not ask first; see
 // [Process.Stop] for that. It is safe to call repeatedly and after exit.
 func (p *Process) Kill() error {
+	p.conn.RevokeHostServices()
 	err := p.signalGroup()
 	select {
 	case <-p.exited:
@@ -348,6 +364,7 @@ func (p *Process) Stop(ctx context.Context) error {
 }
 
 func (p *Process) stop(ctx context.Context) error {
+	p.conn.RevokeHostServices()
 	deadline := time.Now().Add(p.spec.UnloadTimeout)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d

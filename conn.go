@@ -45,13 +45,16 @@ type Conn struct {
 	// is a dead connection).
 	br *bufio.Reader
 
+	writeTimeout   time.Duration
 	defaultTimeout time.Duration
 	maxFrame       int
 	maxInbound     int
 	droppedInbound atomic.Int64
 	droppedCancel  atomic.Int64
 
-	nextID atomic.Int64
+	nextID      atomic.Int64
+	configError error
+	reverse     *reverseConnection
 
 	mu      sync.Mutex
 	pending map[subprocess.RPCID]*pendingCall
@@ -59,6 +62,7 @@ type Conn struct {
 	// reader has ended or Close ran. Nil while the connection is live.
 	closedBy error
 
+	activeReceipt    *reverseReceipt
 	queue            frameQueue
 	wake             chan struct{}
 	outbound         map[*queuedFrame]*outboundFrame
@@ -114,6 +118,7 @@ func NewConn(r io.Reader, w io.Writer, opts ...ConnOption) *Conn {
 		r:              r,
 		br:             bufio.NewReaderSize(r, 64*1024),
 		defaultTimeout: defaultCallTimeout,
+		writeTimeout:   physicalWriteTimeout,
 		maxFrame:       defaultMaxFrame,
 		maxInbound:     defaultMaxInbound,
 		pending:        map[subprocess.RPCID]*pendingCall{},
@@ -124,6 +129,13 @@ func NewConn(r io.Reader, w io.Writer, opts ...ConnOption) *Conn {
 	}
 	for _, o := range opts {
 		o(c)
+	}
+	if c.reverse != nil {
+		c.maxFrame = min(c.maxFrame, defaultMaxFrame)
+		c.maxInbound = min(c.maxInbound, defaultMaxInbound)
+	}
+	if c.configError != nil {
+		c.fail(c.configError)
 	}
 	go c.write()
 	go c.read()
@@ -318,7 +330,7 @@ func (c *Conn) deliver(line []byte) {
 		return
 	}
 	if frame.request {
-		c.refuseInbound(frame)
+		c.routeInbound(frame)
 		return
 	}
 	c.mu.Lock()
@@ -334,14 +346,25 @@ func (c *Conn) deliver(line []byte) {
 			out.err = errors.Join(out.err, &subprocess.InitError{Code: subprocess.InitInvalid, Field: "result"})
 		}
 	} else if frame.response.Error == nil {
-		if err := validatePendingResult(call.method, frame.response.Result); err != nil {
+		result, err := c.validateReply(call, frame.response.Result)
+		out.initResult = result
+		if err != nil {
 			out.err = fmt.Errorf("%w: %s result: %w", ErrProtocolMismatch, call.method, err)
 		}
 	}
+	c.mu.Lock()
+	if c.pending[frame.id] != call {
+		c.mu.Unlock()
+		return
+	}
+	c.acceptReplyLocked(call, out)
+	c.retireParentLocked(call)
+	delete(c.pending, frame.id)
 	select {
 	case call.reply <- out:
 	default:
 	}
+	c.mu.Unlock()
 }
 
 // fail marks the connection unusable with err (first cause wins) and wakes
@@ -350,9 +373,16 @@ func (c *Conn) fail(err error) {
 	c.mu.Lock()
 	if c.closedBy == nil {
 		c.closedBy = err
+		c.closeReverseLocked()
 		close(c.done)
 		c.queue.close()
+		if c.activeReceipt != nil {
+			c.activeReceipt.finishLocked(c)
+		}
 		for _, out := range c.outbound {
+			if out.receipt != nil {
+				out.receipt.finishLocked(c)
+			}
 			if out.cancel {
 				c.droppedCancel.Add(1)
 			}

@@ -44,7 +44,7 @@ func Call[T any](ctx context.Context, c *Conn, method string, params any) (T, er
 
 // Init sends plugin/init.
 func (c *Client) Init(ctx context.Context, params subprocess.InitParams) (subprocess.InitResult, error) {
-	if err := validateInitParams(params); err != nil {
+	if err := c.conn.validateInit(params); err != nil {
 		return subprocess.InitResult{}, err
 	}
 	raw, err := c.conn.Call(ctx, subprocess.MethodInit, params)
@@ -53,7 +53,7 @@ func (c *Client) Init(ctx context.Context, params subprocess.InitParams) (subpro
 	}
 	result, err := decodeInitResult(raw)
 	if err == nil {
-		err = verifyInitResult(params, result)
+		err = c.conn.verifyInit(params, result)
 	}
 	return result, err
 }

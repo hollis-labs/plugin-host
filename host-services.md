@@ -1,9 +1,10 @@
-# Typed host service and binding seam (0189 slice 3)
+# Typed host services and negotiated transport (0189 slices 3–4)
 
-This slice supplies host-owned authority bookkeeping and twelve fixed typed
-operations. It does not enable reverse RPC. `Conn`, `Spec` and Init still refuse
-all reverse/hooks offers. The private execution tests exercise this seam directly;
-they are not real child, negotiated duplex or SDK interoperability passes.
+Host-owned authority bookkeeping supplies twelve fixed typed operations.
+Explicit ReverseProfile now attaches this seam to Conn with an optional offer;
+nil retains reverse refusal and hooks remain refused. Direct executor tests are
+ledger tests; targeted normal-Serve child tests are distinct from full negotiated
+manifest replay and SDK interoperability certification.
 
 The existing SDK pin `5c663e7ce74c40ceceb95133c439396316850858` is retained.
 Compared with the approved planning inputs SDK #56
@@ -44,8 +45,7 @@ and under live Init/Load/explicit-Unload parents, only explicitly granted
 must retire parents on completion, cancellation and failed publication, revoke
 leases on scope loss, revoke the session before disable/reload/crash teardown,
 and close/dispose it on disconnect. A fenced session cannot be made ready again.
-These are host-controlled bookkeeping calls; automatic lifecycle/Conn hookup
-remains a slice 4 requirement.
+These are host-controlled bookkeeping calls; explicit profile wiring now performs lifecycle/Conn hookup; nil remains inert.
 
 Renewal keeps the same binding, shared remaining quotas (including zero), and
 clips its lease to five minutes, root/parent and current grant limits. Grant
@@ -85,32 +85,50 @@ started mutation whose outcome is lost is unknown; cancel is not rollback.
 A full terminal queue prevents backend execution. The future transport caller
 must fence if it cannot publish a bounded correlated refusal/terminal reply.
 
-## Slice 4 acceptance dependency
+## Negotiated transport ownership
 
-Keep profile refusal until the next slice wires negotiated activation and a
-bounded worker router. The reader must never invoke `executeHost` or host policy
-synchronously or wait on permits. Writer selection must register the actual
-parent ID and correlation before the first byte; failed/partial write,
-cancellation and completion must retire it. Add real lifecycle integration for
-provisional Init/Load/explicit-Unload log scopes, activated ownership and
-revoke/disable/reload/crash/close disposal. Only then may negotiated children
-exercise this path. Slice 5's manifest-driven Go/Node/Deno replay remains a
-separate gate, with exact SDK heads and runtime versions in its report.
+`Spec.Reverse` plus `Init.HostServices` opts in explicitly; standalone Conn uses
+`WithReverseProfile`. Required decline fails before activation; optional decline
+retains base protocol. Offered methods require implemented typed callbacks (the
+two ledger methods retain optional veto callbacks). Provisional Init admits only
+offered log under the actual live Init parent. Hook offers remain refused.
 
-Concrete transport APIs remain refinements for slice 4, after this seam is
-reviewed. `IssueBinding` currently needs a registered selected parent and does
-entropy/JSON work; it must not simply be called under writer locks. Prepare a
-bounded host-owned reference and authority snapshot outside Conn locks, then
-atomically attach the actual selected ID/parent and patch fixed-width fields
-before the first byte, with a fixed lock order and rollback on publication
-failure. No fake parent ID is reserved for preparation.
+`WithHostBinding` carries copied trusted host metadata for an ordinary call.
+Preparation validates bounded scope/budgets and obtains a random reference
+outside Conn locks. Writer selection attaches the actual parent ID and pending
+correlation before first bytes, with rollback on failure. Parent completion and
+cancellation retire authority before call admission release; stream failures
+fence sessions. No fake ID is reserved and plugin ancestry never issues a lease.
+Lock order is Conn -> HostSession -> frameQueue. Session execution drops its lock
+before publishing through Conn; no host callbacks, entropy or JSON encoding run
+under writer locks.
 
-Full `Revoke` irreversibly fences the business session. Explicit Unload needs a
-separate finite log-only cleanup lease/state under its actual live Unload
-parent; never reopen the revoked business session with `OwnerReady`. Finally,
-`executeHost`'s current queue terminal return does not establish physical-write
-receipt ownership: install Conn receipt metadata/reservation before queue
-visibility, and let the writer retire/release it once on success, failure or
-fence. Refuse unsupported smaller negotiated minima rather than silently
-widening them. These three refinements are dependencies of slice 4, not features
-claimed by this slice 3 candidate.
+Business fencing is irreversible. A distinct connection-authenticated cleanup
+session contains only log grants/ceilings and binds to actual selected Unload.
+It cannot become business-ready; its finite lease closes on Unload terminal reply
+or disconnect. EOF/SIGTERM have no invented cleanup parent. Lifecycle fences
+before teardown waits and owns activation after its callback/current-generation
+check. Standalone Start activates after handshake; raw/Spawn callers explicitly
+call ActivateHostServices after host activation.
+
+The reader reserves bounded terminal credit and installs cancellation before
+starting a bounded worker. Ordinary saturation cannot block reader replies or
+control; handlers retain their shared execution permits until actual return.
+Terminal metadata/reservation handoff is atomic before queue visibility under
+Conn's lock. Writer owns the receipt/inbound ID until physical success, failure
+or fence; once-only retirement balances credit. Partial writes fence the stream.
+
+Fixed admission/byte/depth capacities refuse lower offered floors (16/8/64/2,
+8MiB frame/per lane, depth8), never widen. Larger offers clip to local capacities;
+write timeout narrows to positive offered min local5s. Params/results remain
+1MiB. This is an explicit implementation subset; smaller SDK-local policies do
+not imply a host supports smaller offers.
+
+Targeted pinned-source Go/Node normal-Serve tests cover actual selected IDs,
+lifecycle logging, separate cleanup, typed bound helpers, parent retirement,
+failed/declined Init, timeout/disconnect and lifecycle generation/fence paths.
+Their test-only fd3 bridge has bounded preseeded release input. CI builds these
+assets independently from the module pin. Shared manifest-driven Go/Node/Deno
+replay remains separate: no internal fixture bypass, generic inventory or
+compiler receipt counts as an interoperability pass. Host-specific scope,
+commit transactions, security adapters and durable receipts remain host-owned.

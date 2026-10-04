@@ -156,8 +156,7 @@ plugin can ignore closed stdin and remain orphaned.
 
 ## Compatibility
 
-The wire protocol is plugin-sdk's `subprocess.ProtocolVersion`, currently 2, and the handshake is exact: a plugin answering another protocol fails `Start`. Protocol-1 plugins fail with a typed load-stage protocol failure; there is no fallback. Init acknowledges capability contract 1 and exact identity/version before load. Optional host services/hooks are unimplemented; supplied offers are refused before spawn, and positive acknowledgements fail before load. Typed entry points enforce this
-refusal, including raw `Conn.Call`/`Notify` Init profile offers and
+The wire protocol is plugin-sdk's `subprocess.ProtocolVersion`, currently 2, and the handshake is exact: a plugin answering another protocol fails `Start`. Protocol-1 plugins fail with a typed load-stage protocol failure; there is no fallback. Init acknowledges capability contract 1 and exact identity/version before load. Optional reverse RPC requires explicit `Spec.Reverse` plus a valid `Init.HostServices` offer and shared typed runtime. Nil keeps offer refusal; hooks remain refused. Typed entry points enforce these gates, including raw `Conn.Call`/`Notify` Init profile offers and
 positive profile acknowledgements. A plugin-sdk `ProtocolVersion` bump is a major version change here. The module requires `go 1.26.6`, so a consumer must be at Go 1.26.6 or newer, and depends on plugin-sdk and the standard library. The process-group kill is unix-only; other platforms fall back to killing the one process, and a plugin that forks leaves its helpers behind there.
 
 The exported API is pre-1.0 and unreleased; see [CHANGELOG.md](./CHANGELOG.md).
@@ -185,7 +184,7 @@ The tests start real child processes over the real wire: the test binary re-exec
 CI (`.github/workflows/check.yml`) is the full gate.
 
 Frames default to 8 MiB including LF in both directions. Oversized incoming
-lines are discarded without losing the connection; host-services and hooks offers are refused before spawn. Lifecycle methods with a deadline send `{"context":{"timeout_ms":N}}`; without a deadline they send absent or empty params, never null. The
+lines are discarded without losing the connection; reverse offers require explicit opt-in; hooks offers are refused before spawn. Lifecycle methods with a deadline send `{"context":{"timeout_ms":N}}`; without a deadline they send absent or empty params, never null. The
 SDK is pinned by pseudo-version until a tagged plugin-sdk release carries protocol 2.
 
 Standalone `Supervise` callers must supply `SuperviseOptions.InitFactory` for
@@ -198,3 +197,46 @@ replaces `Spec.Init.Incarnation` with its issued tuple.
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+## Optional reverse RPC
+
+Set `Spec.Reverse = &pluginhost.ReverseProfile{Runtime: runtime, Required: true}`
+and supply an exact `Init.HostServices` offer. Share one `HostServiceRuntime`
+across the host; offered business methods require their typed callbacks. The
+module SDK pin remains unchanged; negotiated plugin runtimes must implement the
+separately pinned optional profile. Nil is the default and refuses offers.
+Optional decline keeps base protocol 2; required decline fails before activation.
+
+Pass trusted narrowing with `WithHostBinding(ctx, HostBinding{GrantID: ...,
+Scope: ...})` for a forward invocation. Leave Parent unset: the writer assigns
+and registers its real selected ID before the first byte. Metadata/entropy/JSON
+preparation happens outside Conn locks. Completion, cancellation and failed
+publication retire parent authority immediately. The host still validates
+scope/caller/backend policy and couples `HostCall.CheckCommit` to its effect
+transaction; transport does not provide durable receipts or automatic retries.
+
+`ReverseProfile.LifecycleBinding` supplies an explicitly granted `log.write`
+narrowing for Init/Load and a separate finite Unload cleanup lease. Business
+revocation is irreversible; cleanup never reopens that session. Lifecycle fences
+at Disable/detach before host cleanup, and marks ownership ready after Activate.
+Standalone `Start` marks it ready after Load; callers using `Spawn`/`Handshake`
+or raw Conn call `ActivateHostServices` after successful host activation.
+`RevokeHostServices` immediately fences business; Close/crash fences all leases.
+
+Admission/credit limits currently have fixed floors: 16 forward, 8 reverse,
+64 shared host, 2 control, 8 MiB frame and bytes per writer lane, depth 8. Offers
+below these supported floors are refused rather than widened. Larger offers
+clip to local capacities; positive whole-write timeouts clip to local 5s (the
+SDK fixture's 1000ms works), with cancellation at min(100ms, write ceiling).
+Host-service params/results remain capped at 1 MiB. A reader dispatches bounded
+workers without running policy/backends; terminal metadata and credits transfer
+to the writer before queue visibility and remain owned until physical outcome.
+
+Focused normal-Serve Go/Node child tests build source
+`90adf1f02ddffde708fa3784f0063bab5171462b` (base
+`d04ab2149506a96e8c54b58829f58ee480e0de41`) separately from the module pin.
+Their private fd3 bridge uses bounded preseeded releases and actual Spawn/Conn/
+cancel/Stop/Lifecycle paths. These tests are separate from manifest replay:
+shared Go/Node/Deno obligations and receipts stay pending until the real adapter
+runs them. Hook clients/composition remain unavailable pending SDK per-item
+scope support. No consumer activation or release follows from these tests.

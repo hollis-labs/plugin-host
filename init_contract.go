@@ -56,7 +56,7 @@ func validateInit(s Spec) error {
 	if strings.TrimSpace(s.ExpectedID) == "" {
 		return initFailure(s, &subprocess.InitError{Code: subprocess.InitInvalid, Field: "id"})
 	}
-	if err := validateInitParams(s.Init); err != nil {
+	if err := validateReverseSpec(s); err != nil {
 		return initFailure(s, err)
 	}
 	// Marshal validates opaque JSON and nested SDK values before any child

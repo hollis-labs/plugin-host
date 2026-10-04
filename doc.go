@@ -19,9 +19,9 @@
 // ownership, enable/disable/reload and context-aware scope disposal callbacks.
 // It owns one classified retry loop over processes, never a nested Supervisor.
 //
-// [HostServiceRuntime] supplies a dormant closed typed host-service seam and
-// connection-bound leases. It does not enable reverse negotiation or attach to
-// Conn; see host-services.md for the next-slice integration requirements.
+// [HostServiceRuntime] supplies closed typed host services and connection-bound
+// leases. [ReverseProfile] explicitly opts into negotiated reverse RPC; nil
+// preserves offer refusal. See host-services.md for policy and replay boundaries.
 //
 // # What the host still decides
 //
@@ -35,7 +35,7 @@
 // Init uses the SDK's protocol-2 DTO and capability contract 1. Structural
 // validation precedes spawn; acknowledgement and identity/version verification
 // precede load. ExpectedID must match incarnation.owner_id. Reverse and hooks
-// profile offers are refused before spawn.
+// hooks offers are refused; reverse offers require an explicit [ReverseProfile].
 //
 // # Contracts worth knowing
 //

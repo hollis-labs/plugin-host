@@ -11,9 +11,8 @@ import (
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
-// executeHost is deliberately private and NOT reached by Conn. Slice4 must
-// establish negotiated activation, bounded reader routing, actual parent
-// publication/retirement and terminal write receipts before wiring this seam.
+// executeHost is the direct test seam; negotiated Conn workers supply their
+// reserved terminal publisher to executeHostWithReply.
 // Its caller is a bounded worker, never the reader. It reserves reply credit
 // before running host code and retains execution admission until code returns.
 func (s *HostSession) executeHost(ctx context.Context, id uint64, method HostMethod, raw []byte, queue *frameQueue) (*queuedFrame, error) {
@@ -28,6 +27,11 @@ func (s *HostSession) executeHost(ctx context.Context, id uint64, method HostMet
 		return nil, err
 	}
 	defer credit.release()
+	return s.executeHostWithReply(ctx, id, method, raw, false, credit.terminal)
+}
+
+// No session lock may be held when invoking publish (Conn -> session -> queue).
+func (s *HostSession) executeHostWithReply(ctx context.Context, id uint64, method HostMethod, raw []byte, claimed bool, publish func([]byte, []byte) (*queuedFrame, error)) (*queuedFrame, error) {
 	var authority HostAuthority
 	reply := func(result any, err error) (*queuedFrame, error) {
 		wire := hostWireReply(id, result, err)
@@ -36,17 +40,21 @@ func (s *HostSession) executeHost(ctx context.Context, id uint64, method HostMet
 			fallbackError.Code = capability.UnknownOutcome
 		}
 		fallback := hostWireReply(id, nil, fallbackError)
+		var fencedError error
 		s.mu.Lock()
-		defer s.mu.Unlock()
 		if err == nil && result != nil {
 			if fenced := s.checkAuthorityLocked(authority); fenced != nil {
 				if effectfulMethod(method) {
 					fenced = &capability.Error{Code: capability.UnknownOutcome, EffectState: capability.Unknown}
 				}
-				wire = hostWireReply(id, nil, fenced)
+				fencedError = fenced
 			}
 		}
-		return credit.terminal(wire, fallback)
+		s.mu.Unlock()
+		if fencedError != nil {
+			wire = hostWireReply(id, nil, fencedError)
+		}
+		return publish(wire, fallback)
 	}
 	if len(raw) > 1<<20 {
 		return reply(nil, hostRefusal(capability.InvalidRequest, ""))
@@ -77,7 +85,7 @@ func (s *HostSession) executeHost(ctx context.Context, id uint64, method HostMet
 		s.Revoke()
 		return nil, hostRefusal(capability.InvalidRequest, "")
 	}
-	if id <= s.reverseHighWater {
+	if !claimed && id <= s.reverseHighWater {
 		s.mu.Unlock()
 		cancel()
 		permit.release()
@@ -89,7 +97,7 @@ func (s *HostSession) executeHost(ctx context.Context, id uint64, method HostMet
 		permit.release()
 		return reply(nil, err)
 	}
-	s.reverseHighWater = id
+	s.reverseHighWater = max(s.reverseHighWater, id)
 	s.active[id] = hostActiveCall{method: method, binding: authority.BindingID, cancel: cancel}
 	s.mu.Unlock()
 	call := &HostCall{session: s, authority: authority, ctx: callCtx}
