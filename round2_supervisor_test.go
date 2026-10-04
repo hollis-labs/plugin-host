@@ -80,7 +80,14 @@ func TestSupervisorHostCancelledHealthDoesNotKill(t *testing.T) {
 	if err := sup.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(60 * time.Millisecond) // Probe is blocked waiting for its own reply.
+	eventually(t, time.Second, "health request publication", func() bool {
+		for _, method := range recordedInitMethods(spec.Init.DataDir) {
+			if method == "plugin/health" {
+				return true
+			}
+		}
+		return false
+	}) // The raw plugin records the probe but never replies.
 	if err := sup.Stop(context.Background()); err != nil {
 		t.Fatal(err)
 	}

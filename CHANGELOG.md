@@ -57,8 +57,8 @@ refuses a tag whose CHANGELOG has no heading for it.
 - Health maps authored internal failures to unhealthy, malformed/protocol failures
   to protocol mismatch, and only SDK rate-limit/deadline replies to typed
   inconclusive probes. Silent local health timeouts count as unhealthy;
-  host-cancelled probes leave the cached verdict unchanged. Inconclusive probes are retried by HealthGate and never trigger health
-  kills. The SDK shares 16 execution slots; excess calls receive rate_limited.
+  host-cancelled probes leave the cached verdict unchanged. Inconclusive probes
+  are retried by HealthGate and never trigger health kills. The SDK shares 16 execution slots; excess calls receive rate_limited.
 - Deadline responses preserve their typed RPC cause/effect state and also match
   context.DeadlineExceeded, including unknown outcomes at the local deadline
   (3 ms tolerance for wire rounding and timer skew). Caller cancellation controls

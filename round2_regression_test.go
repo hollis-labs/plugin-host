@@ -26,7 +26,7 @@ func TestDeadlineReplyPreservesUnknownEffectAndLocalExpiry(t *testing.T) {
 	for _, code := range []capability.Code{capability.DeadlineExceeded, capability.UnknownOutcome} {
 		for _, offset := range []time.Duration{-time.Millisecond, time.Millisecond, time.Hour} {
 			ctx := pendingDeadlineContext{context.Background(), time.Now().Add(offset)}
-			rpc := &subprocess.RPCError{Code: capability.HostRPCErrorCode, Message: "deadline", Data: subprocess.HostRPCErrorData{Contract: "host-rpc/1", Code: code, EffectState: capability.Unknown}}
+			rpc := &subprocess.RPCError{Code: capability.HostRPCErrorCode, Message: "deadline", Data: subprocess.HostRPCErrorData{Contract: "host-rpc/1", Code: code, RequestID: 1, EffectState: capability.Unknown}}
 			_, err := finish(ctx, subprocess.MethodMCPCallTool, subprocess.RPCResponse{Error: rpc})
 			wantDeadline := code == capability.DeadlineExceeded || offset <= time.Millisecond
 			var got *subprocess.RPCError
@@ -56,6 +56,9 @@ func TestLocalHealthTimeoutRefusesAndHostCancellationPreservesVerdict(t *testing
 	if err := healthError(context.DeadlineExceeded); !errors.Is(err, ErrUnhealthy) || errors.Is(err, ErrHealthInconclusive) {
 		t.Fatal(err)
 	}
+	if err := healthError(context.Canceled); !errors.Is(err, context.Canceled) || errors.Is(err, ErrUnhealthy) || errors.Is(err, ErrHealthInconclusive) {
+		t.Fatal("host cancellation classified as health", err)
+	}
 	before := v
 	canceled, stop := context.WithCancel(context.Background())
 	stop()
@@ -84,6 +87,9 @@ func (w shortControlWriter) Write([]byte) (int, error)        { return w.n, w.er
 func TestPartialCancellationControlRetiresConnection(t *testing.T) {
 	for _, writeErr := range []error{nil, io.ErrUnexpectedEOF} {
 		p := newPeer(t)
+		if err := p.conn.w.(io.Closer).Close(); err != nil {
+			t.Fatal(err)
+		}
 		p.conn.w = shortControlWriter{n: 20, err: writeErr}
 		p.conn.cancelCall(subprocess.NumberID(1), context.Canceled)
 		select {
@@ -105,6 +111,9 @@ func TestCancellationControlWriteBound(t *testing.T) {
 	defer writer.Close()
 	defer reader.Close()
 	p := newPeer(t)
+	if err := p.conn.w.(io.Closer).Close(); err != nil {
+		t.Fatal(err)
+	}
 	p.conn.w = writer
 	start := time.Now()
 	p.conn.cancelCall(subprocess.NumberID(1), context.Canceled)
@@ -194,7 +203,7 @@ func TestReplyKeepsAlreadyDeliveredContextError(t *testing.T) {
 	for _, expired := range []bool{false, true} {
 		var ctx context.Context
 		var cancel context.CancelFunc
-		want := error(context.Canceled)
+		want := context.Canceled
 		if expired {
 			ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 			want = context.DeadlineExceeded
