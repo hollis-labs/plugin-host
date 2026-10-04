@@ -126,8 +126,9 @@ func NewConn(r io.Reader, w io.Writer, opts ...ConnOption) *Conn {
 //
 // ctx bounds this call and nothing else: canceling it deregisters the waiter
 // and returns ctx's error. A best-effort host-owned rpc/cancel is attempted for
-// a published request, except terminal unload; dropped controls do not close
-// the connection and are counted by [Conn.CancelDropped].
+// a published request, except terminal unload. Zero-byte dropped controls leave
+// the connection up; a partial control frame retires it. [Conn.CancelDropped]
+// counts controls that were not published completely.
 // Other calls retain their own contexts. A plugin-reported error comes back as
 // *subprocess.RPCError (use [errors.As]); deadline replies additionally match
 // context.DeadlineExceeded via [errors.Is], preserving the RPC effect state.
@@ -205,8 +206,14 @@ func finish(ctx context.Context, method string, response subprocess.RPCResponse)
 		cause := error(response.Error)
 		if ctx.Err() != nil {
 			cause = errors.Join(cause, ctx.Err())
-		} else if code, ok := applicationCode(response.Error); ok && code == capability.DeadlineExceeded {
-			cause = errors.Join(cause, context.DeadlineExceeded)
+		} else if code, ok := applicationCode(response.Error); ok {
+			deadline, bounded := ctx.Deadline()
+			// The wire budget rounds down to milliseconds. Allow that rounding
+			// plus timer delivery skew without classifying an early unknown
+			// outcome as a local deadline expiry.
+			if code == capability.DeadlineExceeded || (code == capability.UnknownOutcome && bounded && time.Until(deadline) <= 3*time.Millisecond) {
+				cause = errors.Join(cause, context.DeadlineExceeded)
+			}
 		}
 		return nil, fmt.Errorf("pluginhost: %s: %w", method, cause)
 	}

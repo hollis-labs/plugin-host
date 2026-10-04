@@ -14,7 +14,7 @@ const defaultHealthTTL = time.Second
 
 // HealthVerdict is one plugin/health outcome.
 type HealthVerdict struct {
-	// Inconclusive reports a busy or expired probe; it is not cached as unhealthy.
+	// Inconclusive reports a rate-limit or deadline reply; it is not cached as unhealthy.
 	Inconclusive bool
 	// OK is the plugin's own answer.
 	OK bool
@@ -61,7 +61,8 @@ func NewHealthGate(probe func(context.Context) (subprocess.HealthResult, error),
 }
 
 // Probe returns the cached verdict if it is younger than the TTL, else asks
-// the plugin and caches the answer. The round trip holds no lock, so a slow
+// the plugin and caches the answer. Host cancellation returns an unchecked
+// verdict (Checked is zero) and preserves the cache. The round trip holds no lock, so a slow
 // probe never blocks Check; two callers racing past the cache may each send
 // one plugin/health, which is bounded and cheaper than serializing them.
 func (g *HealthGate) Probe(ctx context.Context) HealthVerdict {
@@ -75,6 +76,12 @@ func (g *HealthGate) Probe(ctx context.Context) HealthVerdict {
 
 	var verdict HealthVerdict
 	result, err := g.probe(ctx)
+	// Host cancellation says nothing about plugin health and must not replace
+	// the last verdict (including an existing refusal).
+	var rpc *subprocess.RPCError
+	if errors.Is(err, context.Canceled) && !errors.As(err, &rpc) {
+		return HealthVerdict{Message: err.Error()}
+	}
 	if err != nil {
 		var rpcErr *subprocess.RPCError
 		verdict = HealthVerdict{Message: err.Error(), Reachable: errors.As(err, &rpcErr), Inconclusive: errors.Is(err, ErrHealthInconclusive)}

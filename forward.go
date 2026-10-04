@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"strconv"
 	"time"
 
@@ -135,7 +137,7 @@ func refreshForwardParams(ctx context.Context, method string, params any) (any, 
 }
 
 // CancelDropped counts best-effort cancellation controls that could not be
-// published. A dropped control never retires the connection.
+// published completely. A partial control frame retires the connection.
 func (c *Conn) CancelDropped() int64 { return c.droppedCancel.Load() }
 
 func (c *Conn) cancelCall(id subprocess.RPCID, cause error) *subprocess.RPCResponse {
@@ -185,6 +187,12 @@ func (c *Conn) cancelCall(id subprocess.RPCID, cause error) *subprocess.RPCRespo
 	defer func() { _ = deadlineWriter.SetWriteDeadline(time.Time{}) }()
 	if n, err := c.w.Write(encoded); err != nil || n != len(encoded) {
 		c.droppedCancel.Add(1)
+		if n > 0 && n < len(encoded) {
+			if err == nil {
+				err = io.ErrShortWrite
+			}
+			c.fail(fmt.Errorf("%w: partial cancellation control: %w", ErrGone, err))
+		}
 	}
 	return nil
 }

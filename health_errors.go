@@ -10,11 +10,11 @@ import (
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
-// ErrHealthInconclusive means a probe produced no health verdict. Busy and
-// expired probes do not count toward the supervisor's unhealthy kill threshold.
+// ErrHealthInconclusive means a reply produced no health verdict. Rate-limit and
+// deadline replies do not count toward the supervisor's unhealthy kill threshold.
 var ErrHealthInconclusive = errors.New("pluginhost: health probe inconclusive")
 
-// HealthInconclusiveError retains the typed transport or context cause.
+// HealthInconclusiveError retains the typed RPC reply and any joined context cause.
 type HealthInconclusiveError struct{ Cause error }
 
 func (e *HealthInconclusiveError) Error() string {
@@ -49,8 +49,8 @@ func healthError(err error) error {
 		}
 		return errors.Join(ErrProtocolMismatch, err)
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return &HealthInconclusiveError{Cause: err}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errors.Join(ErrUnhealthy, err)
 	}
 	return err
 }

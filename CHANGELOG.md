@@ -17,6 +17,9 @@ refuses a tag whose CHANGELOG has no heading for it.
 - `WithForwardBinding` carries an invocation's host-issued binding reference.
 - Positive safe outbound IDs fail with `ErrRequestIDExhausted` instead of wrapping.
 - Forward calls transmit remaining budgets and send host-owned cancellation controls.
+- `ErrHealthInconclusive`, `HealthInconclusiveError`, and
+  `HealthVerdict.Inconclusive` expose health replies without a verdict.
+- `Conn.CancelDropped` counts cancellation controls not published completely.
 
 
 - `Supervisor.PendingFactory` and `ErrInitFactoryPending` expose host factory
@@ -41,16 +44,22 @@ refuses a tag whose CHANGELOG has no heading for it.
   seconds for the SDK's five-second shutdown budget plus margin. Failed-start
   pre-Init unload refusal does not mark teardown incomplete.
 - Health maps authored internal failures to unhealthy, malformed/protocol failures
-  to protocol mismatch, and SDK rate limits/deadlines to typed inconclusive
-  probes. Inconclusive probes are retried by HealthGate and never trigger health
+  to protocol mismatch, and only SDK rate-limit/deadline replies to typed
+  inconclusive probes. Silent local health timeouts count as unhealthy;
+  host-cancelled probes leave the cached verdict unchanged. Inconclusive probes are retried by HealthGate and never trigger health
   kills. The SDK shares 16 execution slots; excess calls receive rate_limited.
 - Deadline responses preserve their typed RPC cause/effect state and also match
-  context.DeadlineExceeded. Caller cancellation controls are best effort, bounded,
-  counted when dropped, and never retire the connection. Terminal unload sends
+  context.DeadlineExceeded, including unknown outcomes at the local deadline
+  (3 ms tolerance for wire rounding and timer skew). Caller cancellation controls
+  are best effort, bounded to 100 ms, and counted when dropped. Zero-byte drops
+  leave the connection up; partial control writes retire it. Writers without
+  SetWriteDeadline receive no cancel controls. Terminal unload sends
   no cancellation control. Notifications acquire no implicit forward deadline.
 - Payload encoding precedes writer acquisition; remaining timeout is updated at
-  publication without re-encoding opaque payloads under the writer.
+  publication in a ten-byte space-padded timeout slot without re-encoding opaque
+  payloads under the writer. Typed-nil forward params are rejected locally.
 - Optional hooks and reverse offers remain refused; duplex activation is deferred.
+  Raw Conn.Call for plugin/init bypasses the typed entry-point refusal.
 
 
 - Supervisor factory tuples share Lifecycle's generation ledger across controller

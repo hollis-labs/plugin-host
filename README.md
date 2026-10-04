@@ -79,13 +79,21 @@ With no deadline and a disabled connection default, no wire deadline is invented
 Caller cancellation attempts an absent-ID `rpc/cancel` with `request_owner: host`.
 It is best effort: a busy writer or a stream without enforceable write deadlines
 skips the control and increments `Conn.CancelDropped`, preserving other calls.
-Control writes have a 100 ms bound and never close the connection on failure.
+Control writes have a 100 ms bound. Zero-byte failures leave the connection up;
+a partial control frame retires it because the stream is corrupt. Writers without
+`SetWriteDeadline` receive no cancellation controls. Reserved control capacity
+under sustained writer contention remains part of the next transport slice.
 Notifications retain supplied context metadata but acquire no wire timeout from
 their local write budget. Terminal unload never sends cancellation control.
 Deadline replies retain `*subprocess.RPCError` and its effect state while also
-matching `context.DeadlineExceeded` through `errors.Is`.
+matching `context.DeadlineExceeded` through `errors.Is`. An `unknown_outcome`
+reply at the local deadline (within 3 ms for wire rounding and timer skew) also
+matches that sentinel without losing its typed effect state.
 Outbound IDs are positive safe integers and fail at exhaustion instead of wrapping;
-incoming tagged IDs keep zero, integers and strings distinct.
+incoming tagged IDs keep zero, integers and strings distinct. Typed-nil forward
+params are rejected locally: forward params must be a non-null object. Encoding
+reserves a ten-byte space-padded numeric timeout slot so publication can update
+the remaining budget without re-encoding the opaque payload.
 
 `plugin/unload` is terminal: SDK Serve drains and invokes cleanup once before
 replying and exiting. The default graceful stop budget is six seconds, allowing
@@ -93,16 +101,22 @@ its five-second shutdown budget plus margin. A shorter caller context or explici
 budget can force teardown sooner. Pre-Init unload refusal is tolerated during
 failed-start cleanup. An authored internal Health failure is unhealthy with its
 RPC cause retained. Invalid request/method/params and malformed Health results
-are protocol failures. SDK rate limits and deadlines return
+are protocol failures. Only SDK replies carrying `rate_limited` or
+`deadline_exceeded` return
 `*HealthInconclusiveError`: neither healthy nor unhealthy, never counted toward
 `KillAfterUnhealthy`. They break the supervisor's consecutive failure streak.
 `HealthGate` retries these probes immediately and does not refuse dispatch on
 an inconclusive verdict. The SDK shares 16 execution slots across ordinary calls
 and Health; excess concurrent calls receive typed `rate_limited` failures.
+A local health timeout with no reply is unhealthy and counts toward the kill
+threshold. A host-cancelled probe provides neither verdict and leaves the cached
+health verdict unchanged.
 
 ## Compatibility
 
-The wire protocol is plugin-sdk's `subprocess.ProtocolVersion`, currently 2, and the handshake is exact: a plugin answering another protocol fails `Start`. Protocol-1 plugins fail with a typed load-stage protocol failure; there is no fallback. Init acknowledges capability contract 1 and exact identity/version before load. Optional host services/hooks are unimplemented; supplied offers are refused before spawn, and positive acknowledgements fail before load. A plugin-sdk `ProtocolVersion` bump is a major version change here. The module requires `go 1.26.6`, so a consumer must be at Go 1.26.6 or newer, and depends on plugin-sdk and the standard library. The process-group kill is unix-only; other platforms fall back to killing the one process, and a plugin that forks leaves its helpers behind there.
+The wire protocol is plugin-sdk's `subprocess.ProtocolVersion`, currently 2, and the handshake is exact: a plugin answering another protocol fails `Start`. Protocol-1 plugins fail with a typed load-stage protocol failure; there is no fallback. Init acknowledges capability contract 1 and exact identity/version before load. Optional host services/hooks are unimplemented; supplied offers are refused before spawn, and positive acknowledgements fail before load. Typed entry points enforce this
+refusal; a raw `Client().Conn().Call("plugin/init", ...)` bypasses the guard, so
+hosts must use typed Init/handshake entry points. A plugin-sdk `ProtocolVersion` bump is a major version change here. The module requires `go 1.26.6`, so a consumer must be at Go 1.26.6 or newer, and depends on plugin-sdk and the standard library. The process-group kill is unix-only; other platforms fall back to killing the one process, and a plugin that forks leaves its helpers behind there.
 
 The exported API is pre-1.0 and unreleased; see [CHANGELOG.md](./CHANGELOG.md).
 

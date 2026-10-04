@@ -41,7 +41,7 @@
 //     with exec.CommandContext.
 //   - A call's context bounds that call and carries its remaining forward budget.
 //     Cancellation attempts best-effort host-owned rpc/cancel; late replies are
-//     dropped. Failed cancellation control does not retire the connection.
+//     dropped. Zero-byte control drops leave the connection up; partial control frames retire it.
 //     Deadline RPC errors also match context.DeadlineExceeded.
 //   - When the pipe ends, every waiter fails at once with [ErrGone], and a
 //     final frame written before the exit is delivered first.
