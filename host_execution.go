@@ -16,6 +16,7 @@ import (
 // Its caller is a bounded worker, never the reader. It reserves reply credit
 // before running host code and retains execution admission until code returns.
 func (s *HostSession) executeHost(ctx context.Context, id uint64, method HostMethod, raw []byte, queue *frameQueue) (*queuedFrame, error) {
+	receivedAt := time.Now()
 	if id == 0 || id > capability.MaxSafeInteger {
 		return nil, hostRefusal(capability.InvalidRequest, "")
 	}
@@ -27,11 +28,11 @@ func (s *HostSession) executeHost(ctx context.Context, id uint64, method HostMet
 		return nil, err
 	}
 	defer credit.release()
-	return s.executeHostWithReply(ctx, id, method, raw, false, credit.terminal)
+	return s.executeHostWithReply(ctx, id, method, raw, receivedAt, false, credit.terminal)
 }
 
 // No session lock may be held when invoking publish (Conn -> session -> queue).
-func (s *HostSession) executeHostWithReply(ctx context.Context, id uint64, method HostMethod, raw []byte, claimed bool, publish func([]byte, []byte) (*queuedFrame, error)) (*queuedFrame, error) {
+func (s *HostSession) executeHostWithReply(ctx context.Context, id uint64, method HostMethod, raw []byte, receivedAt time.Time, claimed bool, publish func([]byte, []byte) (*queuedFrame, error)) (*queuedFrame, error) {
 	var authority HostAuthority
 	reply := func(result any, err error) (*queuedFrame, error) {
 		wire := hostWireReply(id, result, err)
@@ -63,7 +64,14 @@ func (s *HostSession) executeHostWithReply(ctx context.Context, id uint64, metho
 	if err != nil {
 		return reply(nil, hostRefusal(capability.InvalidRequest, ""))
 	}
-	authority, err = s.prepareHost(method, grant, reverse)
+	// Parsing, dispatch, and authority/admission waits consume the same budget.
+	requestDeadline := receivedAt.Add(time.Duration(reverse.TimeoutMS) * time.Millisecond)
+	ctx, requestCancel := context.WithDeadline(ctx, requestDeadline)
+	defer requestCancel()
+	if contextErr := ctx.Err(); contextErr != nil {
+		return reply(nil, hostContextError(contextErr))
+	}
+	authority, err = s.prepareHostAt(method, grant, reverse, receivedAt)
 	if err != nil {
 		return reply(nil, err)
 	}
@@ -163,7 +171,12 @@ func (s *HostSession) executeHostWithReply(ctx context.Context, id uint64, metho
 	}
 }
 
+//nolint:unparam // Direct ledger test seam; negotiated workers supply receipt time to prepareHostAt.
 func (s *HostSession) prepareHost(method HostMethod, grantID string, reverse subprocess.ReverseContext) (HostAuthority, error) {
+	return s.prepareHostAt(method, grantID, reverse, time.Now())
+}
+
+func (s *HostSession) prepareHostAt(method HostMethod, grantID string, reverse subprocess.ReverseContext, receivedAt time.Time) (HostAuthority, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.runtime == nil {
@@ -191,7 +204,7 @@ func (s *HostSession) prepareHost(method HostMethod, grantID string, reverse sub
 	if (isLifecycleMethod(binding.parent.method) || !s.ownerReady) && method != HostLog {
 		return HostAuthority{}, hostRefusal(capability.TargetUnavailable, "")
 	}
-	deadline := earliest(binding.expiry, binding.parent.deadline, time.Now().Add(ceiling), time.Now().Add(time.Duration(reverse.TimeoutMS)*time.Millisecond))
+	deadline := earliest(binding.expiry, binding.parent.deadline, receivedAt.Add(ceiling), receivedAt.Add(time.Duration(reverse.TimeoutMS)*time.Millisecond))
 	a := HostAuthority{Owner: s.owner, ConnectionInstance: s.connection, BindingID: reverse.BindingID, Grant: binding.grant, Scope: binding.spec.Scope, Caller: binding.spec.Caller, Root: binding.spec.Root, Parent: reverse.ParentCall, Depth: binding.spec.Depth + 1, Origin: append([]Owner(nil), binding.spec.Origin...), Method: method, Deadline: deadline}
 	if err := s.checkAuthorityLocked(a); err != nil {
 		return HostAuthority{}, err

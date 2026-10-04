@@ -214,6 +214,9 @@ preparation happens outside Conn locks. Completion, cancellation and failed
 publication retire parent authority immediately. The host still validates
 scope/caller/backend policy and couples `HostCall.CheckCommit` to its effect
 transaction; transport does not provide durable receipts or automatic retries.
+Reverse request and method budgets start at local monotonic frame receipt;
+parsing, dispatch and authority/admission waits consume that same deadline.
+Expiry before backend entry returns `deadline_exceeded` with `not_started`.
 
 `ReverseProfile.LifecycleBinding` supplies an explicitly granted `log.write`
 narrowing for Init/Load and a separate finite Unload cleanup lease. Business

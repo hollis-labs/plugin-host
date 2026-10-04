@@ -11,6 +11,10 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Fixed
 
+- Negotiated reverse calls preserve their receipt-time request/method deadlines
+  through parsing and authority/admission waits; expired calls refuse before
+  backend entry with typed `deadline_exceeded` / `not_started`.
+
 - Status snapshots and formatted terminal errors retain bounded copies of stderr
   after host redaction, so clipped strings cannot retain an expanded allocation.
   Lifecycle recovery tests read the current process once per replacement poll.

@@ -173,7 +173,7 @@ func (c *Conn) routeInbound(frame wireEnvelope) {
 	go func() {
 		defer cancel()
 		defer func() { c.mu.Lock(); delete(r.active, id); r.workers--; c.mu.Unlock() }()
-		_, err := session.executeHostWithReply(ctx, id, method, frame.params, true, func(wire, fallback []byte) (*queuedFrame, error) {
+		_, err := session.executeHostWithReply(ctx, id, method, frame.params, frame.receivedAt, true, func(wire, fallback []byte) (*queuedFrame, error) {
 			c.mu.Lock()
 			defer c.mu.Unlock()
 			if c.closedBy != nil {

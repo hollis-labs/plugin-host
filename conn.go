@@ -325,7 +325,10 @@ func (c *Conn) read() {
 // deliver is the single direction-aware demultiplexer. Invalid envelopes and
 // late replies are dropped; method-bearing frames never inspect pending calls.
 func (c *Conn) deliver(line []byte) {
+	// Receipt starts the local monotonic budget before envelope parsing or locks.
+	receivedAt := time.Now()
 	frame, err := decodeWireEnvelope(line)
+	frame.receivedAt = receivedAt
 	if err != nil && !frame.invalidResult {
 		return
 	}

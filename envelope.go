@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/hollis-labs/plugin-host/internal/strictjson"
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
 type wireEnvelope struct {
+	receivedAt    time.Time
 	id            subprocess.RPCID
 	params        json.RawMessage
 	method        string
