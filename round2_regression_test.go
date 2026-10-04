@@ -91,7 +91,7 @@ func TestPartialCancellationControlRetiresConnection(t *testing.T) {
 			t.Fatal(err)
 		}
 		p.conn.w = shortControlWriter{n: 20, err: writeErr}
-		p.conn.cancelCall(subprocess.NumberID(1), context.Canceled)
+		p.conn.writeFrame(cancelControlFrame(t), &outboundFrame{cancel: true})
 		select {
 		case <-p.conn.Done():
 		default:
@@ -116,7 +116,7 @@ func TestCancellationControlWriteBound(t *testing.T) {
 	}
 	p.conn.w = writer
 	start := time.Now()
-	p.conn.cancelCall(subprocess.NumberID(1), context.Canceled)
+	p.conn.writeFrame(cancelControlFrame(t), &outboundFrame{cancel: true})
 	elapsed := time.Since(start)
 	// A zero-byte deadline failure leaves the stream usable. No peer reads, so
 	// this exercises the actual writer deadline rather than a fake timeout.
@@ -219,4 +219,13 @@ func TestReplyKeepsAlreadyDeliveredContextError(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+}
+
+func cancelControlFrame(t *testing.T) []byte {
+	t.Helper()
+	frame, err := json.Marshal(subprocess.RPCRequest{JSONRPC: "2.0", Method: "rpc/cancel", Params: subprocess.CancelParams{RequestOwner: subprocess.HostRPCOwnerHost, ID: subprocess.NumberID(1), Reason: subprocess.CallerCancelled}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(frame, '\n')
 }

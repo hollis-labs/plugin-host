@@ -11,7 +11,7 @@ import (
 
 // Client is a thin typed layer over a [Conn]: one method per plugin-sdk
 // protocol method, passing the SDK's own request and result structs through
-// untouched so fields the SDK adds later flow without a change here.
+// untouched. Conn validates replies against the pinned SDK method contract.
 //
 // There is deliberately no typed ListTools. subprocess.MethodListTools is
 // declared by the SDK but its Serve has no dispatch case for it; a host that
