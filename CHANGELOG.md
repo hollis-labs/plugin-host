@@ -14,6 +14,9 @@ refuses a tag whose CHANGELOG has no heading for it.
 - `MismatchError` carries bounded printable expected/actual identity and version
   metadata while retaining mismatch sentinels. Lifecycle failures preserve the
   nested redacted mismatch diagnostic and typed cause.
+- `WithForwardBinding` carries an invocation's host-issued binding reference.
+- Positive safe outbound IDs fail with `ErrRequestIDExhausted` instead of wrapping.
+- Forward calls transmit remaining budgets and send host-owned cancellation controls.
 
 
 - `Supervisor.PendingFactory` and `ErrInitFactoryPending` expose host factory
@@ -31,6 +34,15 @@ refuses a tag whose CHANGELOG has no heading for it.
   per-generation cleanup history and safe-integer generation validation.
 
 ### Changed
+
+- Pin the SDK's bounded admission/cancellation runtime. Tagged RPC IDs preserve
+  string and numeric identity; only an absent ID denotes a notification.
+- Unload is terminal and invokes cleanup once; default graceful stop allows six
+  seconds for the SDK's five-second shutdown budget plus margin. Failed-start
+  pre-Init unload refusal does not mark teardown incomplete.
+- Health RPC failures are unhealthy verdicts with typed causes retained.
+- Optional hooks and reverse offers remain refused; duplex activation is deferred.
+
 
 - Supervisor factory tuples share Lifecycle's generation ledger across controller
   recreation; completed disposal releases the active checkpoint without reusing

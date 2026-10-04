@@ -140,7 +140,7 @@ func TestPluginInitRejectionsRemainTyped(t *testing.T) {
 		{subprocess.InitInvalid, "init"}, {subprocess.InitProtocolMismatch, "protocol"}, {subprocess.InitCapabilityContractMismatch, "capability_contract"}, {subprocess.InitProfileMismatch, "profile"},
 	} {
 		t.Run(string(tc.code), func(t *testing.T) {
-			rpc := subprocess.RPCResponse{JSONRPC: "2.0", ID: 1, Error: &subprocess.RPCError{Code: -32602, Message: "init refused", Data: (&subprocess.InitError{Code: tc.code, Field: "host_info.protocol", Expected: 1, Received: 2}).RPCData()}}
+			rpc := subprocess.RPCResponse{JSONRPC: "2.0", ID: subprocess.NumberID(1), Error: &subprocess.RPCError{Code: -32602, Message: "init refused", Data: (&subprocess.InitError{Code: tc.code, Field: "host_info.protocol", Expected: 1, Received: 2}).RPCData()}}
 			wire, err := json.Marshal(rpc)
 			if err != nil {
 				t.Fatal(err)

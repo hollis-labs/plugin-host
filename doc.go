@@ -39,15 +39,16 @@
 //     unless the host says so with [InheritEnv].
 //   - The plugin never dies with its start context: a process is never built
 //     with exec.CommandContext.
-//   - A call's context bounds that call only. Giving up costs one call; the
-//     late reply is dropped.
+//   - A call's context bounds that call and carries its remaining forward budget.
+//     Cancellation sends host-owned rpc/cancel; late replies are dropped.
 //   - When the pipe ends, every waiter fails at once with [ErrGone], and a
 //     final frame written before the exit is delivered first.
 //   - A request over the frame cap (8 MiB, the limit plugin-sdk's Serve
 //     reads with) is refused with [ErrFrameTooLarge] before anything is
 //     written, because Serve would end its read loop on it and the plugin
 //     would exit.
-//   - Stop takes at most UnloadTimeout + ReapTimeout, and the final kill
+//   - Unload is terminal and cleanup runs once. Stop defaults to a 6s graceful
+//     budget, takes at most UnloadTimeout + ReapTimeout, and the final kill
 //     reaches the whole process group.
 //
 // Test hosts against the same requirements with package pluginhosttest.

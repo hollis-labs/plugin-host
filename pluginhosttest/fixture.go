@@ -245,7 +245,7 @@ func runEcho() int {
 	p.healthy.Store(true)
 	err := subprocess.Serve(p)
 	// Written only after Serve returned: its presence proves the host ended
-	// the plugin through stdin EOF or SIGTERM, not SIGKILL.
+	// the plugin through terminal unload, stdin EOF or SIGTERM, not SIGKILL.
 	writeDirFile("serve-returned", "1")
 	if err != nil {
 		return 1
@@ -284,6 +284,10 @@ func (p *echoPlugin) Load(context.Context) (subprocess.LoadResult, error) {
 
 func (p *echoPlugin) Unload(context.Context) error {
 	p.record(subprocess.MethodUnload)
+	p.mu.Lock()
+	trace, _ := json.Marshal(p.trace)
+	p.mu.Unlock()
+	writeDirFile("cleanup-trace", string(trace))
 	return nil
 }
 
@@ -353,8 +357,8 @@ func (p *echoPlugin) MCPCallTool(ctx context.Context, req subprocess.MCPCallRequ
 // --- hostile fixtures: a raw stdio loop ---
 
 type rawRequest struct {
-	ID     int64  `json:"id"`
-	Method string `json:"method"`
+	ID     subprocess.RPCID `json:"id"`
+	Method string           `json:"method"`
 }
 
 // rawWriter serializes frames onto stdout.
@@ -366,16 +370,21 @@ func (w *rawWriter) line(b []byte) {
 	_, _ = os.Stdout.Write(append(b, '\n'))
 }
 
-func (w *rawWriter) result(id int64, result any) {
+func (w *rawWriter) result(id subprocess.RPCID, result any) {
 	payload, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 	w.line(payload)
 }
 
-func (w *rawWriter) fail(id int64, code int, message string) {
+func (w *rawWriter) fail(id subprocess.RPCID, code int, message string) {
 	payload, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": code, "message": message},
 	})
 	w.line(payload)
+}
+
+func rpcIDText(id subprocess.RPCID) string {
+	b, _ := json.Marshal(id)
+	return string(b)
 }
 
 func runRaw(behavior string) int {
@@ -415,6 +424,9 @@ func runRaw(behavior string) int {
 
 // handleRaw answers one request. It reports whether the fixture exits.
 func handleRaw(behavior string, w *rawWriter, req rawRequest) (int, bool) {
+	if req.ID == (subprocess.RPCID{}) {
+		return 0, false
+	}
 	if behavior == BehaviourHangOnInit {
 		return 0, false
 	}
@@ -435,7 +447,7 @@ func handleRaw(behavior string, w *rawWriter, req rawRequest) (int, bool) {
 			w.result(req.ID, map[string]any{"id": "fixture", "name": "Fixture", "version": "1.0.0", "description": "", "protocol": 2, "capability_contract": 1, "reverse_rpc_version": 1})
 			return 0, false
 		case BehaviourDuplicateInit:
-			w.line([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"id":"fixture","name":"Fixture","version":"1.0.0","description":"","protocol":2,"protocol":2,"capability_contract":1}}`, req.ID)))
+			w.line([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"id":"fixture","name":"Fixture","version":"1.0.0","description":"","protocol":2,"protocol":2,"capability_contract":1}}`, rpcIDText(req.ID))))
 			return 0, false
 		case BehaviourWrongID:
 			w.result(req.ID, subprocess.InitResult{ID: "other", Name: "Other", Version: "1.0.0", Protocol: subprocess.ProtocolVersion, CapabilityContract: capability.ContractVersion})

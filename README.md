@@ -54,7 +54,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer func() {
-		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		stopCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 		defer cancel()
 		_ = p.Stop(stopCtx)
 	}()
@@ -71,6 +71,21 @@ func main() {
 ```
 
 `Start` spawns the process, runs `plugin/init` then `plugin/load`, and returns a `*Process`. `Spawn` validates the complete SDK Init payload before starting a child, leaving the handshake to the host. Required directories, host version and incarnation must be provided. Zero protocol/contract default to 2/1, config defaults to `{}`, and nil grants encode as `[]`. `Supervise` requires an `InitFactory` for restarts and wraps a `Spec` to restart explicitly classified transient exits through a full handshake with backoff. `Lifecycle` adds staged planning, generation-owned enable/disable/reload and cleanup callbacks; see [the lifecycle contract](docs/lifecycle.md). `guard.Guarded` runs an in-process plugin call under a panic and budget guard.
+
+Calls to SDK forward methods carry `context.timeout_ms` from the remaining local
+call budget. An existing shorter DTO budget narrows the call; writer wait consumes
+it. `WithForwardBinding` carries a host-issued reference without creating authority.
+With no deadline and a disabled connection default, no wire deadline is invented.
+Caller cancellation sends absent-ID `rpc/cancel` with `request_owner: host`.
+Outbound IDs are positive safe integers and fail at exhaustion instead of wrapping;
+incoming tagged IDs keep zero, integers and strings distinct.
+
+`plugin/unload` is terminal: SDK Serve drains and invokes cleanup once before
+replying and exiting. The default graceful stop budget is six seconds, allowing
+its five-second shutdown budget plus margin. A shorter caller context or explicit
+budget can force teardown sooner. Pre-Init unload refusal is tolerated during
+failed-start cleanup. A Health callback RPC failure is an unhealthy verdict with
+its typed cause retained, rather than a protocol mismatch.
 
 ## Compatibility
 

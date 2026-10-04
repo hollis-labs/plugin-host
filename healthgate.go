@@ -2,6 +2,7 @@ package pluginhost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -72,7 +73,8 @@ func (g *HealthGate) Probe(ctx context.Context) HealthVerdict {
 	var verdict HealthVerdict
 	result, err := g.probe(ctx)
 	if err != nil {
-		verdict = HealthVerdict{Message: err.Error()}
+		var rpcErr *subprocess.RPCError
+		verdict = HealthVerdict{Message: err.Error(), Reachable: errors.As(err, &rpcErr)}
 	} else {
 		verdict = HealthVerdict{OK: result.OK, Message: result.Message, Reachable: true}
 	}

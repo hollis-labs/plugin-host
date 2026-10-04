@@ -4,6 +4,10 @@ import "errors"
 
 // Sentinel errors. Every one is reported wrapped, so test with [errors.Is].
 var (
+	// ErrRequestIDExhausted means the positive JS-safe ID space is consumed.
+	// No request is published and IDs are never wrapped or reused.
+	ErrRequestIDExhausted = errors.New("pluginhost: request ID space exhausted")
+
 	// ErrGone reports that the plugin's pipe closed (it exited, crashed or was
 	// killed) or that the [Conn] was closed, while a call was outstanding or
 	// before one was sent. Callers get it at once when the pipe ends; nothing
