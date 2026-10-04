@@ -15,42 +15,35 @@ import (
 
 type writerWithoutDeadline struct{ io.Writer }
 
-func TestCancelBestEffortDoesNotRetireConnection(t *testing.T) {
-	for _, busy := range []bool{false, true} {
-		t.Run(map[bool]string{false: "no_deadline", true: "writer_busy"}[busy], func(t *testing.T) {
-			p := newPeer(t)
-			if !busy {
-				p.conn.w = writerWithoutDeadline{p.conn.w}
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			call := callAsync(ctx, p.conn, "work")
-			p.request()
-			if busy {
-				p.conn.writeGate <- struct{}{}
-			}
-			cancel()
-			cancel()
-			if got := await(t, call); !errors.Is(got.err, context.Canceled) {
-				t.Fatal(got.err)
-			}
-			if busy {
-				<-p.conn.writeGate
-			}
-			if p.conn.CancelDropped() != 1 {
-				t.Fatal(p.conn.CancelDropped())
-			}
-			select {
-			case <-p.conn.Done():
-				t.Fatal("cancel closed connection")
-			default:
-			}
-			next := callAsync(context.Background(), p.conn, "unrelated")
-			req := p.request()
-			p.reply(req.ID, `true`)
-			if got := await(t, next); got.err != nil {
-				t.Fatal(got.err)
-			}
-		})
+func TestCancelWithoutDeadlineDoesNotRetireConnection(t *testing.T) {
+	p := newPeer(t)
+	original := p.conn.w
+	t.Cleanup(func() { _ = closeIf(original) })
+	p.conn.w = writerWithoutDeadline{original}
+	ctx, cancel := context.WithCancel(context.Background())
+	call := callAsync(ctx, p.conn, "work")
+	p.request()
+	cancel()
+	if got := await(t, call); !errors.Is(got.err, context.Canceled) {
+		t.Fatal(got.err)
+	}
+	waitCancelDropped(t, p.conn)
+	next := callAsync(context.Background(), p.conn, "unrelated")
+	req := p.request()
+	p.reply(req.ID, `true`)
+	if got := await(t, next); got.err != nil {
+		t.Fatal(got.err)
+	}
+}
+
+func waitCancelDropped(t *testing.T, c *Conn) {
+	t.Helper()
+	deadline := time.Now().Add(testWait)
+	for c.CancelDropped() != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("lost control drop")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -80,7 +73,10 @@ func TestNotifyDoesNotInventForwardDeadline(t *testing.T) {
 
 func TestForwardBudgetAccountsForWriterWait(t *testing.T) {
 	p := newPeer(t)
-	p.conn.writeGate <- struct{}{}
+	gate := holdNextWrite(t, p.conn)
+	barrier := make(chan error, 1)
+	go func() { barrier <- p.conn.Notify("barrier", nil) }()
+	<-gate.started
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	call := callAsync(ctx, p.conn, subprocess.MethodHealth)
@@ -89,7 +85,7 @@ func TestForwardBudgetAccountsForWriterWait(t *testing.T) {
 	deadline := time.Now().Add(testWait)
 	for {
 		p.conn.mu.Lock()
-		admitted := len(p.conn.pending) == 1
+		admitted := p.conn.ordinaryCalls == 1
 		p.conn.mu.Unlock()
 		if admitted {
 			break
@@ -100,7 +96,13 @@ func TestForwardBudgetAccountsForWriterWait(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	time.Sleep(150 * time.Millisecond)
-	<-p.conn.writeGate
+	close(gate.release)
+	if err := <-barrier; err != nil {
+		t.Fatal(err)
+	}
+	if req := p.frame(); req.Method != "barrier" {
+		t.Fatal(req.Method)
+	}
 	req := p.request()
 	raw, _ := json.Marshal(req.Params)
 	var params struct {
@@ -261,6 +263,8 @@ func TestCancelDeadlineAndWriteFailuresLeaveOtherCallsAlive(t *testing.T) {
 	for _, rejectDeadline := range []bool{true, false} {
 		t.Run(map[bool]string{true: "deadline_refused", false: "write_failed"}[rejectDeadline], func(t *testing.T) {
 			p := newPeer(t)
+			original := p.conn.w
+			t.Cleanup(func() { _ = closeIf(original) })
 			if rejectDeadline {
 				p.conn.w = refusingDeadlineWriter{p.conn.w}
 			} else {
@@ -273,9 +277,7 @@ func TestCancelDeadlineAndWriteFailuresLeaveOtherCallsAlive(t *testing.T) {
 			if got := await(t, call); !errors.Is(got.err, context.Canceled) {
 				t.Fatal(got.err)
 			}
-			if p.conn.CancelDropped() != 1 {
-				t.Fatal("lost control drop")
-			}
+			waitCancelDropped(t, p.conn)
 			next := callAsync(context.Background(), p.conn, "next")
 			request := p.request()
 			p.reply(request.ID, `true`)
@@ -286,33 +288,9 @@ func TestCancelDeadlineAndWriteFailuresLeaveOtherCallsAlive(t *testing.T) {
 	}
 }
 
-func TestCancelControlSkipsAdmittedReply(t *testing.T) {
-	p := newPeer(t)
-	id := subprocess.NumberID(1)
-	response := subprocess.RPCResponse{JSONRPC: "2.0", ID: id, Result: json.RawMessage(`true`)}
-	reply := make(chan subprocess.RPCResponse, 1)
-	reply <- response
-	p.conn.mu.Lock()
-	p.conn.pending[id] = reply
-	p.conn.mu.Unlock()
-	got := p.conn.cancelCall(id, context.Canceled)
-	if got == nil || string(got.Result) != "true" {
-		t.Fatal("admitted reply consumed by cancellation")
-	}
-	if p.conn.CancelDropped() != 0 {
-		t.Fatal("attempted cancellation")
-	}
-	if err := p.conn.Notify("barrier", nil); err != nil {
-		t.Fatal(err)
-	}
-	if next := p.frame(); next.Method != "barrier" {
-		t.Fatalf("cancel after reply: %+v", next)
-	}
-}
-
 func TestClosedConnectionCheckAtPublication(t *testing.T) {
 	var writer bytes.Buffer
-	c := &Conn{w: &writer, maxFrame: defaultMaxFrame, writeGate: make(chan struct{}, 1), done: make(chan struct{}), closedBy: ErrGone}
+	c := &Conn{w: &writer, maxFrame: defaultMaxFrame, done: make(chan struct{}), closedBy: ErrGone}
 	// Keep Done unready to force the writer-select branch, then check the
 	// authoritative fence before publication. Both production branches can win
 	// when writer capacity and Done are ready together.

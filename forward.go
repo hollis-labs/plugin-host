@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"strconv"
 	"time"
 
@@ -82,6 +80,11 @@ func prepareForwardCall(ctx context.Context, method string, params any) (any, co
 	if err != nil {
 		return nil, ctx, end, err
 	}
+	if method == subprocess.MethodInit {
+		if err = refuseProfileOffer(fields); err != nil {
+			return nil, ctx, end, err
+		}
+	}
 	if supplied != nil {
 		limit := time.Now().Add(time.Duration(supplied.TimeoutMS) * time.Millisecond)
 		if deadline, ok := ctx.Deadline(); !ok || limit.Before(deadline) {
@@ -94,6 +97,15 @@ func prepareForwardCall(ctx context.Context, method string, params any) (any, co
 		end()
 	}
 	return out, ctx, end, err
+}
+
+func refuseProfileOffer(fields map[string]json.RawMessage) error {
+	for _, name := range []string{"host_services", "hooks_profile"} {
+		if _, present := fields[name]; present {
+			return &subprocess.InitError{Code: subprocess.InitProfileMismatch, Field: "unsupported_profile", Expected: 0, Received: 1}
+		}
+	}
+	return nil
 }
 
 func refreshForwardParams(ctx context.Context, method string, params any) (any, error) {
@@ -136,66 +148,9 @@ func refreshForwardParams(ctx context.Context, method string, params any) (any, 
 	return fields, err
 }
 
-// CancelDropped counts best-effort cancellation controls that could not be
+// CancelDropped counts cancellation controls that could not be
 // published completely. A partial control frame retires the connection.
 func (c *Conn) CancelDropped() int64 { return c.droppedCancel.Load() }
-
-func (c *Conn) cancelCall(id subprocess.RPCID, cause error) *subprocess.RPCResponse {
-	reason := subprocess.CallerCancelled
-	if errors.Is(cause, context.DeadlineExceeded) {
-		reason = subprocess.DeadlineExpired
-	}
-	encoded, err := json.Marshal(subprocess.RPCRequest{JSONRPC: "2.0", Method: "rpc/cancel", Params: subprocess.CancelParams{RequestOwner: subprocess.HostRPCOwnerHost, ID: id, Reason: reason}})
-	if err != nil {
-		c.droppedCancel.Add(1)
-		return nil
-	}
-	encoded = append(encoded, '\n')
-	deadlineWriter, ok := c.w.(interface{ SetWriteDeadline(time.Time) error })
-	if !ok || len(encoded) > c.maxFrame {
-		c.droppedCancel.Add(1)
-		return nil
-	}
-	// Never wait behind an ordinary frame or detach a goroutine that could
-	// outlive its caller. Streams without enforceable deadlines are skipped.
-	select {
-	case c.writeGate <- struct{}{}:
-	default:
-		c.droppedCancel.Add(1)
-		return nil
-	}
-	defer func() { <-c.writeGate }()
-	c.mu.Lock()
-	closed := c.closedBy != nil
-	if reply := c.pending[id]; reply != nil {
-		select {
-		case response := <-reply:
-			c.mu.Unlock()
-			return &response
-		default:
-		}
-	}
-	c.mu.Unlock()
-	if closed {
-		c.droppedCancel.Add(1)
-		return nil
-	}
-	if deadlineWriter.SetWriteDeadline(time.Now().Add(cancelWriteTimeout)) != nil {
-		c.droppedCancel.Add(1)
-		return nil
-	}
-	defer func() { _ = deadlineWriter.SetWriteDeadline(time.Time{}) }()
-	if n, err := c.w.Write(encoded); err != nil || n != len(encoded) {
-		c.droppedCancel.Add(1)
-		if n > 0 && n < len(encoded) {
-			if err == nil {
-				err = io.ErrShortWrite
-			}
-			c.fail(fmt.Errorf("%w: partial cancellation control: %w", ErrGone, err))
-		}
-	}
-	return nil
-}
 
 func mustDeadline(ctx context.Context) time.Time { deadline, _ := ctx.Deadline(); return deadline }
 

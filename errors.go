@@ -21,9 +21,8 @@ var (
 	// is why the host refuses instead of sending.
 	ErrFrameTooLarge = errors.New("pluginhost: request frame exceeds the frame cap")
 
-	// ErrProtocolMismatch reports a plugin whose plugin/init answer names a
-	// wire protocol other than the one this library speaks. The handshake is
-	// exact, not ranged.
+	// ErrProtocolMismatch reports a reply or handshake that does not match
+	// its exact protocol or pending-method contract.
 	ErrProtocolMismatch = errors.New("pluginhost: plugin speaks a different wire protocol")
 
 	// ErrNoPluginID reports a plugin/init answer with an empty plugin id.

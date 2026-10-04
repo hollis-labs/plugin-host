@@ -76,24 +76,49 @@ Calls to SDK forward methods carry `context.timeout_ms` from the remaining local
 call budget. An existing shorter DTO budget narrows the call; writer wait consumes
 it. `WithForwardBinding` carries a host-issued reference without creating authority.
 With no deadline and a disabled connection default, no wire deadline is invented.
-Caller cancellation attempts an absent-ID `rpc/cancel` with `request_owner: host`.
-It is best effort: a busy writer or a stream without enforceable write deadlines
-skips the control and increments `Conn.CancelDropped`, preserving other calls.
-Control writes have a 100 ms bound. Zero-byte failures leave the connection up;
-a partial control frame retires it because the stream is corrupt. Writers without
-`SetWriteDeadline` receive no cancellation controls. Reserved control capacity
-under sustained writer contention remains part of the next transport slice.
+Calls enter bounded admission before encoding: 16 ordinary calls and two
+lifecycle calls; a full admission or writer lane returns `ErrAdmissionFull`
+without publication. One writer owns two FIFO lanes, each capped at 32 frames
+and 8 MiB, plus one active whole frame. Lifecycle requests and controls use the
+control lane; at most four controls overtake an eligible ordinary frame.
+Each admitted call reserves capacity for its absent-ID `rpc/cancel` with
+`request_owner: host`. Ordinary contention cannot drop it. A call canceled
+before writer selection consumes no ID and sends no control. Terminal unload
+never sends cancellation control. A selected cancellation has a fresh 100 ms
+write bound. Zero-byte failures increment `Conn.CancelDropped` and preserve the
+connection; partial frames retire it. Native write deadlines are preferred;
+otherwise a closeable stream is closed on expiry. Custom non-closeable writers
+must bound their own writes, and receive no cancellation controls when they
+cannot enforce write deadlines. Ordinary and terminal writes have a five-second
+ceiling, shortened by the call deadline.
 Notifications retain supplied context metadata but acquire no wire timeout from
 their local write budget. Terminal unload never sends cancellation control.
 Deadline replies retain `*subprocess.RPCError` and its effect state while also
 matching `context.DeadlineExceeded` through `errors.Is`. An `unknown_outcome`
 reply at the local deadline (within 3 ms for wire rounding and timer skew) also
 matches that sentinel without losing its typed effect state.
-Outbound IDs are positive safe integers and fail at exhaustion instead of wrapping;
-incoming tagged IDs keep zero, integers and strings distinct. Typed-nil forward
+Outbound IDs are positive safe integers issued in physical publication order.
+Pending correlation is registered before the first byte is written, and IDs
+fail at exhaustion instead of wrapping. Incoming tagged IDs keep zero, integers and strings distinct. Typed-nil forward
 params are rejected locally: forward params must be a non-null object. Encoding
 reserves a ten-byte space-padded numeric timeout slot so publication can update
 the remaining budget without re-encoding the opaque payload.
+
+The single reader classifies method-bearing frames independently of outgoing
+reply IDs. An inbound request can share an outgoing ID without answering that
+call; it receives a bounded method-not-found refusal while profiles remain
+unimplemented. Inbound notifications have no effect. Duplicate active inbound
+IDs retire the connection; retired positive numeric IDs are rejected using a
+single high-water mark, without a growing lifetime ID set. Inbound string request
+IDs over 128 UTF-8 bytes retire the connection to keep refusals within terminal
+credit; tagged reply IDs remain distinct. Replies require exact-case `jsonrpc: "2.0"`, an ID,
+and exactly one `result` or `error`, with no extra envelope members or duplicate
+keys (including nested keys). Invalid UTF-8 and unpaired surrogates are refused.
+Successful replies are validated against the pending method's SDK result type;
+a mismatched result returns `ErrProtocolMismatch` to that caller. Junk, malformed
+envelopes and late replies are dropped without stopping the reader. An invalid
+result in an otherwise unambiguous envelope fails its correlated call, preserving
+typed Init failures.
 
 `plugin/unload` is terminal: SDK Serve drains and invokes cleanup once before
 replying and exiting. The default graceful stop budget is six seconds, allowing
@@ -101,7 +126,7 @@ its five-second shutdown budget plus margin. A shorter caller context or explici
 budget can force teardown sooner. Pre-Init unload refusal is tolerated during
 failed-start cleanup. An authored internal Health failure is unhealthy with its
 RPC cause retained. Invalid request/method/params and malformed Health results
-are protocol failures. Only SDK replies carrying `rate_limited` or
+are protocol failures. Local `ErrAdmissionFull` and SDK replies carrying `rate_limited` or
 `deadline_exceeded` return
 `*HealthInconclusiveError`: neither healthy nor unhealthy, never counted toward
 `KillAfterUnhealthy`. They break the supervisor's consecutive failure streak.
@@ -118,7 +143,9 @@ up its restart budget; permanent failures do not set it. `LastFailure` preserves
 the terminal cause, while `LastExit` identifies the last failed, reaped child's `Owner`,
 `ExitInfo` (exit code, signal and error) and `StderrTail`. The tail uses existing
 `Tail` secret redaction and `Spec.Redact`, then is capped to `Spec.StderrBytes`
-(default 4096 bytes), including when the host redactor expands its output.
+(default 4096 bytes), including when the host redactor expands its output. Status
+and formatted process errors own bounded copies, so discarded redactor output
+does not remain allocated through a clipped string.
 Automatic recovery retains the last exit; explicit Lifecycle Enable/Reload
 starts a new attempt cycle and clears it. Status summaries include “restart
 attempts exhausted” and the exit code/signal; hosts can display `StderrTail`
@@ -130,8 +157,8 @@ plugin can ignore closed stdin and remain orphaned.
 ## Compatibility
 
 The wire protocol is plugin-sdk's `subprocess.ProtocolVersion`, currently 2, and the handshake is exact: a plugin answering another protocol fails `Start`. Protocol-1 plugins fail with a typed load-stage protocol failure; there is no fallback. Init acknowledges capability contract 1 and exact identity/version before load. Optional host services/hooks are unimplemented; supplied offers are refused before spawn, and positive acknowledgements fail before load. Typed entry points enforce this
-refusal; a raw `Client().Conn().Call("plugin/init", ...)` bypasses the guard, so
-hosts must use typed Init/handshake entry points. A plugin-sdk `ProtocolVersion` bump is a major version change here. The module requires `go 1.26.6`, so a consumer must be at Go 1.26.6 or newer, and depends on plugin-sdk and the standard library. The process-group kill is unix-only; other platforms fall back to killing the one process, and a plugin that forks leaves its helpers behind there.
+refusal, including raw `Conn.Call`/`Notify` Init profile offers and
+positive profile acknowledgements. A plugin-sdk `ProtocolVersion` bump is a major version change here. The module requires `go 1.26.6`, so a consumer must be at Go 1.26.6 or newer, and depends on plugin-sdk and the standard library. The process-group kill is unix-only; other platforms fall back to killing the one process, and a plugin that forks leaves its helpers behind there.
 
 The exported API is pre-1.0 and unreleased; see [CHANGELOG.md](./CHANGELOG.md).
 

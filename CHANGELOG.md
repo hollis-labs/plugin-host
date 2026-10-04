@@ -11,6 +11,9 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Fixed
 
+- Status snapshots and formatted terminal errors retain bounded copies of stderr
+  after host redaction, so clipped strings cannot retain an expanded allocation.
+  Lifecycle recovery tests read the current process once per replacement poll.
 - Supervisor retains the first health-kill cause and stops health polling after
   killing a child; a buffered probe cannot replace a timeout with ErrGone.
 
@@ -32,6 +35,20 @@ refuses a tag whose CHANGELOG has no heading for it.
   Tails apply secret and host redaction and remain bounded after host redaction.
   Status summaries surface restart exhaustion and exit code/signal. Document
   host responsibility for children orphaned after host death without unload.
+- Publication-ordered positive JS-safe IDs, strict direction-aware reply
+  demultiplexing and pending-method result validation. Pending correlation is
+  registered before the first byte; canceled unselected calls consume no ID.
+- Two bounded writer lanes (32 frames/8 MiB each), one whole active write,
+  four-control fairness and reserved cancellation capacity. Ordinary contention
+  no longer drops `rpc/cancel`; controls get a fresh 100 ms write budget.
+- `ErrAdmissionFull` reports immediate effect-free refusal at 16 ordinary/two
+  lifecycle calls or a full writer lane. Whole writes have a five-second ceiling;
+  closeable streams without native deadlines are interrupted on expiry.
+- Raw Init profile offers and positive acknowledgements are refused, alongside
+  typed Init/handshake refusal. Reverse execution and negotiation stay disabled.
+- Manifest-generic SDK interop inventory scaffold with exact source/runtime/build
+  receipts and pending owners; it records obligations, not replay successes.
+
 - `MismatchError` carries bounded printable expected/actual identity and version
   metadata while retaining mismatch sentinels. Lifecycle failures preserve the
   nested redacted mismatch diagnostic and typed cause.

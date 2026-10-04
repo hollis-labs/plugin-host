@@ -10,11 +10,13 @@ import (
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
-// ErrHealthInconclusive means a reply produced no health verdict. Rate-limit and
-// deadline replies do not count toward the supervisor's unhealthy kill threshold.
+// ErrHealthInconclusive means a probe produced no health verdict. Local
+// admission refusal, rate-limit and deadline replies do not count toward the
+// supervisor's unhealthy kill threshold.
 var ErrHealthInconclusive = errors.New("pluginhost: health probe inconclusive")
 
-// HealthInconclusiveError retains the typed RPC reply and any joined context cause.
+// HealthInconclusiveError retains the local refusal or typed RPC reply and any
+// joined context cause.
 type HealthInconclusiveError struct{ Cause error }
 
 func (e *HealthInconclusiveError) Error() string {
@@ -39,6 +41,9 @@ func applicationCode(rpc *subprocess.RPCError) (capability.Code, bool) {
 }
 
 func healthError(err error) error {
+	if errors.Is(err, ErrAdmissionFull) {
+		return &HealthInconclusiveError{Cause: err}
+	}
 	var rpc *subprocess.RPCError
 	if errors.As(err, &rpc) {
 		if rpc.Code == subprocess.ErrCodeInternal {
