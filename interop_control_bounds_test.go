@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"github.com/hollis-labs/plugin-sdk/capability"
+	"github.com/hollis-labs/plugin-sdk/subprocess"
 	"io"
 	"net"
 	"strings"
@@ -347,6 +349,131 @@ func TestInteropNotificationsRequireAuthoredDirectionalCancellation(t *testing.T
 			c.failure <- io.EOF
 			if err := c.finish(0); (err == nil) != valid {
 				t.Fatalf("authored notification valid=%v: %v", valid, err)
+			}
+		})
+	}
+}
+
+func queueGuardEvent(value any) map[string]json.RawMessage {
+	raw, _ := json.Marshal(value)
+	var e map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &e)
+	return e
+}
+func queueGuardWire(direction, kind string, id uint64, method string, params, result any) map[string]json.RawMessage {
+	frame := map[string]any{"jsonrpc": "2.0", "id": id}
+	if method != "" {
+		frame["method"] = method
+		frame["params"] = params
+	} else {
+		frame["result"] = result
+	}
+	raw, _ := json.Marshal(frame)
+	raw = append(raw, '\n')
+	return queueGuardEvent(map[string]any{"kind": "wire", "direction": direction, "frame_type": kind, "id": id, "method": method, "raw": string(raw), "bytes": len(raw)})
+}
+func queueGuardFixture(frames bool) (*interopQueueProof, []map[string]json.RawMessage) {
+	ref := interopQueueRef{Source: "ea8ec0dca862d0c7284cc6a130a4b27fb812ed21", Manifest: "30cb07b87060dc88e9cb6ac5414f7b9cb7bb19c7a97c058e284d96e1e59ff4a9", Recipe: "writer-byte-queue-refuses-before-publication", Scenario: "queue", Profile: "expanded-queue", Runtime: "go", Run: "9bea71ef56ecc44a3a3c7ad65e6d6833", Corpus: 1, Selector: 1}
+	p := &interopQueueProof{Ref: ref, expected: ref, HealthID: 19, CommandID: 41, Name: "put", Args: `{"key":"write","n":1,"operation_key":"queued","value_bytes":65536}`, Binding: "actual-test-binding", Grant: "g-StoragePut", ArmSequence: 2, ReleaseSequence: 4, RefusedIndex: 0, Snapshot: map[string]int{"ordinary_queued": 0, "reverse_pending": 0}, Outcomes: []interopHelperOutcome{{Code: "rate_limited", EffectState: "not_started"}}}
+	if frames {
+		p.Ref.Recipe = "writer-frame-queue-refuses-before-publication"
+		p.Ref.Scenario = "queue-frames"
+		p.Ref.Profile = "expanded-queue-frames"
+		p.expected = p.Ref
+		p.Name = "get"
+		p.Args = `{"key":"read","n":4}`
+		p.Grant = "g-StorageGet"
+		p.Snapshot = map[string]int{"ordinary_queued": 3, "reserved_frames": 1}
+		p.Outcomes = append(p.Outcomes, interopHelperOutcome{Code: "ok", EffectState: "committed"}, interopHelperOutcome{Code: "ok", EffectState: "committed"}, interopHelperOutcome{Code: "ok", EffectState: "committed"})
+		p.BackendCalls = 3
+	}
+	p.ControlTrace = []string{"release:arm-writer/ack:2", "release:snapshot/ack:3", "release:writer/ack:4"}
+	health := queueGuardWire("worker-to-host", "response", p.HealthID, "", nil, map[string]any{"ok": true})
+	_ = json.Unmarshal(health["bytes"], &p.WaitingBytes)
+	events := []map[string]json.RawMessage{
+		queueGuardEvent(map[string]any{"kind": "control_received", "seq": 2}),
+		queueGuardWire("host-to-worker", "request", p.HealthID, "plugin/health", map[string]any{}, nil),
+		queueGuardEvent(map[string]any{"kind": "writer_waiting", "bytes": p.WaitingBytes}),
+		queueGuardWire("host-to-worker", "request", p.CommandID, "command/execute", map[string]any{"name": p.Name, "args": p.Args, "context": map[string]any{"timeout_ms": 5000, "binding_id": p.Binding}}, nil),
+		queueGuardEvent(map[string]any{"kind": "entered", "id": p.CommandID, "name": p.Name, "deadline": true}),
+		queueGuardEvent(map[string]any{"kind": "helper_done", "id": p.CommandID, "index": 0, "failure": p.Outcomes[0]}),
+		queueGuardEvent(map[string]any{"kind": "snapshot", "effects": p.Snapshot}),
+		queueGuardEvent(map[string]any{"kind": "control_received", "seq": 4}), health,
+	}
+	if frames {
+		for i := 1; i <= 3; i++ {
+			id := uint64(40 + i)
+			events = append(events, queueGuardWire("worker-to-host", "request", id, "host/storage/get", map[string]any{"grant_id": p.Grant, "key": "read", "context": map[string]any{"timeout_ms": 4000, "binding_id": p.Binding, "parent_call": map[string]any{"request_owner": "host", "id": p.CommandID}}}, nil), queueGuardWire("host-to-worker", "response", id, "", nil, map[string]any{"found": false}), queueGuardEvent(map[string]any{"kind": "helper_done", "id": p.CommandID, "index": i, "failure": p.Outcomes[i]}))
+			p.Authorities = append(p.Authorities, HostAuthority{Parent: subprocess.ParentCall{RequestOwner: subprocess.HostRPCOwnerHost, ID: p.CommandID}, BindingID: subprocess.BindingID(p.Binding), Grant: capability.Grant{GrantID: p.Grant}, Method: HostStorageGet})
+		}
+	}
+	content, _ := json.Marshal(p.Outcomes)
+	events = append(events, queueGuardWire("worker-to-host", "response", p.CommandID, "", nil, map[string]any{"content": string(content)}))
+	return p, events
+}
+func TestInteropQueueScopedProof(t *testing.T) {
+	for _, frames := range []bool{false, true} {
+		name := "bytes"
+		if frames {
+			name = "frames"
+		}
+		t.Run(name, func(t *testing.T) {
+			p, events := queueGuardFixture(frames)
+			if err := interopWireTerminals(events, 0); err != nil {
+				t.Fatal(err)
+			}
+			if err := interopExpandedHelpers(events, 8, p); err != nil {
+				t.Fatal(err)
+			}
+			if err := interopExpandedHelpers(events, 8); err == nil {
+				t.Fatal("missing local proof accepted")
+			}
+			if err := interopExpandedHelpers(events, 8, p, p); err == nil {
+				t.Fatal("duplicate proof accepted")
+			}
+			mutations := map[string]func(*interopQueueProof, []map[string]json.RawMessage){
+				"foreign-runtime":        func(p *interopQueueProof, _ []map[string]json.RawMessage) { p.Ref.Runtime = "node" },
+				"foreign-run":            func(p *interopQueueProof, _ []map[string]json.RawMessage) { p.Ref.Run = "another-run" },
+				"foreign-source":         func(p *interopQueueProof, _ []map[string]json.RawMessage) { p.Ref.Source = "unreviewed" },
+				"foreign-recipe":         func(p *interopQueueProof, _ []map[string]json.RawMessage) { p.Ref.Recipe = "another-case" },
+				"wrong-profile":          func(p *interopQueueProof, _ []map[string]json.RawMessage) { p.Ref.Profile = "expanded" },
+				"wrong-binding":          func(p *interopQueueProof, _ []map[string]json.RawMessage) { p.Binding = "foreign" },
+				"wrong-grant":            func(p *interopQueueProof, _ []map[string]json.RawMessage) { p.Grant = "g-StorageDelete" },
+				"wrong-command":          func(p *interopQueueProof, _ []map[string]json.RawMessage) { p.CommandID++ },
+				"helper-index":           func(p *interopQueueProof, _ []map[string]json.RawMessage) { p.RefusedIndex++ },
+				"mutated-args":           func(p *interopQueueProof, _ []map[string]json.RawMessage) { p.Args = `{"n":9}` },
+				"backend-effect":         func(p *interopQueueProof, _ []map[string]json.RawMessage) { p.Commits = 1 },
+				"backend-count":          func(p *interopQueueProof, _ []map[string]json.RawMessage) { p.BackendCalls++ },
+				"spoof-snapshot":         func(p *interopQueueProof, _ []map[string]json.RawMessage) { p.Snapshot["ordinary_queued"] = 9 },
+				"wrong-byte-proof":       func(p *interopQueueProof, _ []map[string]json.RawMessage) { p.WaitingBytes++ },
+				"late-refusal":           func(_ *interopQueueProof, e []map[string]json.RawMessage) { e[5], e[7] = e[7], e[5] },
+				"duplicate-helper-index": func(_ *interopQueueProof, e []map[string]json.RawMessage) { e[6] = e[5] },
+				"missing-observed-snapshot": func(_ *interopQueueProof, e []map[string]json.RawMessage) {
+					e[6] = queueGuardEvent(map[string]any{"kind": "padding"})
+				},
+				"missing-refusal": func(_ *interopQueueProof, e []map[string]json.RawMessage) {
+					e[5] = queueGuardEvent(map[string]any{"kind": "padding"})
+				},
+				"wrong-effect-state": func(p *interopQueueProof, _ []map[string]json.RawMessage) { p.Outcomes[0].EffectState = "unknown" },
+				"notification-leftover": func(_ *interopQueueProof, e []map[string]json.RawMessage) {
+					e[6] = queueGuardEvent(map[string]any{"kind": "wire", "direction": "worker-to-host", "frame_type": "notification", "method": "host/unadvertised", "raw": `{"jsonrpc":"2.0","method":"host/unadvertised","params":{}}`})
+				},
+			}
+			for name, mutate := range mutations {
+				t.Run(name, func(t *testing.T) {
+					mutated, e := queueGuardFixture(frames)
+					mutate(mutated, e)
+					if interopExpandedHelpers(e, 8, mutated) == nil && interopWireTerminals(e, 0) == nil {
+						t.Fatal("unowned/inconsistent queue evidence accepted")
+					}
+				})
+			}
+			// A refused mutation appearing on wire is forbidden even with a matching
+			// terminal and zero backend effects: balance alone does not prove local refusal.
+			extra := append([]map[string]json.RawMessage{}, events...)
+			extra = append(extra, queueGuardWire("worker-to-host", "request", 99, "host/storage/put", map[string]any{"grant_id": p.Grant, "key": "write", "operation_key": "queued", "value": "v", "expected_revision": nil, "context": map[string]any{"binding_id": p.Binding, "parent_call": map[string]any{"request_owner": "host", "id": p.CommandID}}}, nil), queueGuardWire("host-to-worker", "response", 99, "", nil, map[string]any{}))
+			if interopExpandedHelpers(extra, 8, p) == nil {
+				t.Fatal("published local-refused mutation accepted")
 			}
 		})
 	}

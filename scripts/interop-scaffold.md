@@ -105,3 +105,29 @@ Reports and run logs stay in `TMPDIR/plugin-host-interop-<source>/`:
 `report.json` (inventory), `control-report.json`, `replay-report.json`, and
 `received-budget-report.json`. SDK draft merge/tag/release, broader adoption,
 profile activation and live actions remain outside this work.
+
+**Selected writer queue cases:** `clip`, `queue`, and `queue-frames` use the
+unchanged authored worker profiles. Each launch resolves its exact source,
+manifest, selector, selected recipe, runtime and random run identity. A sequenced
+arm acknowledgment followed by the actual absent-context Health input ties the
+SDK's bytes-only `writer_waiting` event to that Health terminal's whole physical
+bytes. The finite host observer does not supply a wire context. Helper events
+name the actual command ID and result index; they are not reverse request IDs.
+
+Clip keeps its finite 5000ms authority parent and authored 250ms writer hold,
+then requires a positive reverse wire budget no greater than 4800ms. The byte
+profile retains the SDK-local 32768-byte queue and refuses its 65536-byte put
+before publication or backend entry. The frame profile retains its three-frame
+queue: three real reads and one local `rate_limited/not_started` result. These
+fixture-local policies do not change negotiated host floors or lifecycle slots.
+
+Only a host-assembled per-run proof may reconcile the byte case's one helper
+to zero publications, or the frame case's four helpers to three. Actual method,
+arguments, grant, binding, parent, unique helper indices, blocked snapshots,
+typed command results, backend authority and complete directional wire evidence
+must agree. Missing, foreign, inconsistent or duplicate evidence fails. Default
+helper accounting, notification rejection, F1/F2, terminal credit retirement,
+control/observer EOF, once cleanup and natural worker/bridge exit remain strict.
+Adversarial trace copies are guard evidence, not additional runtime passes.
+Actual reports determine results; forward/credits remain incompatible and all
+other mandatory families and operational/release boundaries remain open.

@@ -316,6 +316,7 @@ func (w *interopEventWriter) failure() error {
 }
 
 type interopControls struct {
+	queueProof           *interopQueueProof
 	privatePlan          *interopPrivatePlan
 	privateWrites        []interopWriteWitness
 	hostCancelEvidence   map[uint64]interopHostCancelEvidence
@@ -478,7 +479,7 @@ func (c *interopControls) finish(expectedCode int) error {
 				return err
 			}
 			if c.expandedReverseLimit != 0 {
-				return interopExpandedHelpers(c.observed, c.expandedReverseLimit)
+				return interopExpandedHelpers(c.observed, c.expandedReverseLimit, c.queueProof)
 			}
 			return nil
 		case <-timer.C:
