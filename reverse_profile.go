@@ -222,6 +222,7 @@ func (c *Conn) revokeBusinessLocked() {
 	if r := c.reverse; r != nil {
 		r.fenced = true
 		r.ready = false
+		c.fenceCorrelationsLocked()
 		r.business.Revoke()
 	}
 }

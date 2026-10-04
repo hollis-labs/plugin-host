@@ -241,11 +241,16 @@ Focused normal-Serve Go/Node child tests build source
 Their private fd3 bridge uses bounded preseeded releases and actual Spawn/Conn/
 cancel/Stop/Lifecycle paths. These tests are separate from manifest replay:
 [isolated manifest adapter](scripts/interop-scaffold.md) records genuine
-Go/Node/Deno finite-parent subset receipts separately from its complete pending
-inventory. The FULL authored `arrival-deadline-and-absent-context` case remains
-source-available, host-unsupported and PENDING/incompatible: this host requires
-finite parents and couples local/wire budgets. Its raw no-context rejection is
-local before publication, with no child command wire or backend execution.
-These subset receipts establish no full 0189/0172 gate or unqualified profile
+Go/Node/Deno execution receipts separately from its complete pending inventory.
+`Conn.CallCorrelation` opts only CommandExecute/Health into transport correlation
+without reverse authority. Its explicit finite observer is independent of the
+remote wire budget; missing wire context stays missing despite defaults. The
+raw deadline/absence replay preserves the literal non-authorizing selector and
+records actual remote timer cause, selected IDs, wire, physical receipts and
+natural exit. Historical `60d0b318` prepublication refusals and failed derived
+timeouts remain separate evidence. Finite authority/lifecycle APIs are unchanged.
+Raw repeated/absent-context Load capacity cases remain pending/incompatible;
+writer/control and other mandatory obligations also remain open.
+These receipts establish no full 0189/0172 gate or unqualified profile
 conformance. Hook clients/composition remain unavailable pending SDK per-item
 scope support. No consumer activation or release follows from these tests.

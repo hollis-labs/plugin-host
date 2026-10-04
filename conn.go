@@ -56,8 +56,9 @@ type Conn struct {
 	configError error
 	reverse     *reverseConnection
 
-	mu      sync.Mutex
-	pending map[subprocess.RPCID]*pendingCall
+	mu           sync.Mutex
+	pending      map[subprocess.RPCID]*pendingCall
+	correlations map[*pendingCall]struct{}
 	// closedBy is the error every pending and future call receives once the
 	// reader has ended or Close ran. Nil while the connection is live.
 	closedBy error
@@ -122,6 +123,7 @@ func NewConn(r io.Reader, w io.Writer, opts ...ConnOption) *Conn {
 		maxFrame:       defaultMaxFrame,
 		maxInbound:     defaultMaxInbound,
 		pending:        map[subprocess.RPCID]*pendingCall{},
+		correlations:   map[*pendingCall]struct{}{},
 		wake:           make(chan struct{}, 1),
 		outbound:       map[*queuedFrame]*outboundFrame{},
 		inboundActive:  map[subprocess.RPCID]bool{},
@@ -170,8 +172,13 @@ func (c *Conn) Call(ctx context.Context, method string, params any) (json.RawMes
 	if err != nil {
 		return nil, fmt.Errorf("pluginhost: %s: %w", method, err)
 	}
+	return c.awaitCall(call)
+}
+
+func (c *Conn) awaitCall(call *pendingCall) (json.RawMessage, error) {
+	method := call.method
 	defer c.releaseCall(call)
-	ctx = call.ctx
+	ctx := call.ctx
 	complete := func(out callReply) (json.RawMessage, error) {
 		if out.err != nil {
 			return nil, fmt.Errorf("pluginhost: %s: %w", method, out.err)
@@ -361,6 +368,7 @@ func (c *Conn) deliver(line []byte) {
 		return
 	}
 	c.acceptReplyLocked(call, out)
+	call.terminal = true
 	c.retireParentLocked(call)
 	delete(c.pending, frame.id)
 	select {
@@ -374,6 +382,10 @@ func (c *Conn) deliver(line []byte) {
 // every waiter.
 func (c *Conn) fail(err error) {
 	c.mu.Lock()
+	c.failLocked(err)
+	c.mu.Unlock()
+}
+func (c *Conn) failLocked(err error) {
 	if c.closedBy == nil {
 		c.closedBy = err
 		c.closeReverseLocked()
@@ -392,7 +404,6 @@ func (c *Conn) fail(err error) {
 		}
 		c.outbound = nil
 	}
-	c.mu.Unlock()
 }
 
 func (c *Conn) gone() error {

@@ -32,13 +32,23 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Added
 
+- Explicit `Conn.CallCorrelation` for CommandExecute/Health with finite local
+  observation independent of authored remote wire budget. Absent wire context
+  stays absent; bounded transport correlation creates no reverse authority.
+  Generic inert selectors cannot authorize helpers. Selected-generation fences,
+  directional observer cancellation and physical publication/control receipts
+  preserve finite authority and once-only credit ownership. Exact isolated
+  Go/Node/Deno raw deadline/absence and separate no-authority/control probes are
+  distinct from remaining full 0189/0172/0163 interoperability obligations.
+
 - Isolated manifest-selected Go/Node/Deno interop adapter with bounded sequenced
   controls, physical wire/backend/exit receipts and authored proposal ownership.
   Exact test fixture source `ea8ec0d` is separate from the unchanged module pin.
-  Acceptance covers the finite-parent implemented subset only. FULL authored
-  `arrival-deadline-and-absent-context` remains source-available, host-unsupported
-  and PENDING/incompatible; no full 0189/0172 gate, unqualified profile conformance
-  or release follows. See `scripts/interop-scaffold.md` for the named limitation.
+  Historical PR14 receipts cover the finite-parent subset: the raw deadline/
+  absence case was unsupported at `60d0b318`. New correlation receipts retain
+  that failure history. Mandatory missing scenarios still prevent a full
+  0189/0172 gate, unqualified profile conformance or release; see
+  `scripts/interop-scaffold.md` for current named limitations.
 
 - Explicit optional `ReverseProfile` negotiation, closed typed reverse dispatch,
   prepared host binding attachment at actual writer-selected IDs, immediate

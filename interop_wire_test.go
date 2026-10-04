@@ -79,7 +79,7 @@ func (w *interopWireWriter) finish() error {
 // Reconcile both directions after observer EOF, rather than trusting the Conn
 // reader to reject stray replies. Input/output observers can run in either
 // order; every terminal must still belong to exactly one published request.
-func interopWireTerminals(events []map[string]json.RawMessage, expectedExit int) error {
+func interopWireTerminals(events []map[string]json.RawMessage, expectedExit int, hostEvidence ...map[uint64]interopHostCancelEvidence) error {
 	type counts struct{ requests, terminals int }
 	ledger := map[string]*counts{}
 	for _, event := range events {
@@ -125,7 +125,7 @@ func interopWireTerminals(events []map[string]json.RawMessage, expectedExit int)
 			return fmt.Errorf("harness unmatched wire terminal %s: requests=%d terminals=%d", key, entry.requests, entry.terminals)
 		}
 	}
-	return interopWireNotifications(events)
+	return interopWireNotifications(events, hostEvidence...)
 }
 
 // Expanded fixture helpers originate only in actual get/put commands, not in
@@ -223,7 +223,14 @@ func interopExpandedHelpers(events []map[string]json.RawMessage, reverseLimit ui
 // Cancellation is the only authored notification in this implemented subset.
 // Account for it against real directional requests and terminal/parent evidence
 // after EOF, preserving observer reorder and opposite-direction ID collisions.
-func interopWireNotifications(events []map[string]json.RawMessage) error {
+// This evidence is supplied only by host test code from actual Conn call/write
+// receipts. Fixture observer events cannot populate it or assert its authority.
+type interopHostCancelEvidence struct {
+	Reason                                      string
+	Published, ControlComplete, ObserverExpired bool
+}
+
+func interopWireNotifications(events []map[string]json.RawMessage, hostEvidence ...map[uint64]interopHostCancelEvidence) error {
 	type request struct {
 		parent      uint64
 		parentOwner string
@@ -307,7 +314,15 @@ func interopWireNotifications(events []map[string]json.RawMessage) error {
 			return errors.New("harness cancellation has no directional published request")
 		}
 		if cancel.owner == "host" {
-			if cancel.reason != "caller_cancelled" { //nolint:misspell // Preserve exact SDK wire spelling.
+			if cancel.reason == "deadline_exceeded" {
+				var evidence interopHostCancelEvidence
+				if len(hostEvidence) == 1 {
+					evidence = hostEvidence[0][cancel.id]
+				}
+				if evidence.Reason != cancel.reason || !evidence.Published || !evidence.ControlComplete || !evidence.ObserverExpired {
+					return errors.New("harness observer cancellation lacks actual host call/write provenance")
+				}
+			} else if cancel.reason != "caller_cancelled" { //nolint:misspell // Preserve exact SDK wire spelling.
 				return errors.New("harness unexpected host cancellation reason")
 			}
 			continue
@@ -315,7 +330,7 @@ func interopWireNotifications(events []map[string]json.RawMessage) error {
 		switch cancel.reason {
 		case "parent_cancelled": //nolint:misspell // Preserve exact SDK wire spelling.
 			parent, canceled := cancels[fmt.Sprintf("host-to-worker/%d", published.parent)]
-			if published.parentOwner != "host" || !canceled || parent.reason != "caller_cancelled" { //nolint:misspell // Preserve exact SDK wire spelling.
+			if published.parentOwner != "host" || !canceled || (parent.reason != "caller_cancelled" && parent.reason != "deadline_exceeded") { //nolint:misspell // Preserve exact SDK wire spelling; host deadline control separately authenticated above.
 				return errors.New("harness descendant cancellation has no actual parent cancellation")
 			}
 		case "deadline_exceeded":

@@ -261,11 +261,11 @@ func TestInteropNotificationsRequireAuthoredDirectionalCancellation(t *testing.T
 		}
 		return event
 	}
-	for _, scenario := range []string{"parent-cancel", "reordered", "opposite-direction-same-id", "deadline", "unadvertised", "wrong-owner", "missing-target", "wrong-parent", "missing-parent-cancel", "duplicate", "unexpected-reason", "unproven-deadline", "malformed-envelope", "extra-params", "duplicate-field"} {
+	for _, scenario := range []string{"parent-cancel", "reordered", "opposite-direction-same-id", "deadline", "observer-deadline", "observer-without-receipt", "observer-without-cause", "unadvertised", "wrong-owner", "missing-target", "wrong-parent", "missing-parent-cancel", "duplicate", "unexpected-reason", "unproven-deadline", "malformed-envelope", "extra-params", "duplicate-field"} {
 		t.Run(scenario, func(t *testing.T) {
 			c := &interopControls{events: make(chan map[string]json.RawMessage, 16), failure: make(chan error, 1)}
 			parent, child, childParent, owner, reason := 31, 7, 31, "plugin", "parent_cancelled" //nolint:misspell // Preserve exact SDK wire spelling.
-			valid := scenario == "parent-cancel" || scenario == "reordered" || scenario == "opposite-direction-same-id" || scenario == "deadline"
+			valid := scenario == "parent-cancel" || scenario == "reordered" || scenario == "opposite-direction-same-id" || scenario == "deadline" || scenario == "observer-deadline"
 			if scenario == "opposite-direction-same-id" {
 				parent = 7
 				childParent = 7
@@ -292,7 +292,12 @@ func TestInteropNotificationsRequireAuthoredDirectionalCancellation(t *testing.T
 			}
 			notifications := []map[string]json.RawMessage{}
 			if scenario != "missing-parent-cancel" && scenario != "deadline" && scenario != "unproven-deadline" {
-				notifications = append(notifications, frame("host-to-worker", "notification", "rpc/cancel", 0, map[string]any{"request_owner": "host", "id": parent, "reason": "caller_cancelled"}, "")) //nolint:misspell // Preserve exact SDK wire spelling.
+				hostReason := "caller_cancelled" //nolint:misspell // Preserve exact SDK wire spelling.
+				if strings.HasPrefix(scenario, "observer-") {
+					hostReason = "deadline_exceeded"
+					c.hostCancelEvidence = map[uint64]interopHostCancelEvidence{uint64(parent): {Reason: hostReason, Published: true, ControlComplete: scenario != "observer-without-receipt", ObserverExpired: scenario != "observer-without-cause"}} //nolint:gosec // Positive small test-owned parent ID.
+				}
+				notifications = append(notifications, frame("host-to-worker", "notification", "rpc/cancel", 0, map[string]any{"request_owner": "host", "id": parent, "reason": hostReason}, ""))
 			}
 			if scenario == "missing-target" {
 				child = 999

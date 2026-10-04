@@ -50,6 +50,10 @@
 //     Calls admit immediately under 16 ordinary/two lifecycle limits; writer
 //     selection issues IDs and registers correlation before publication.
 //     Deadline RPC errors also match context.DeadlineExceeded.
+//   - [Conn.CallCorrelation] explicitly permits only CommandExecute and Health
+//     without reverse authority. A finite passed observer owns local cancellation;
+//     a supplied remote budget is separate, and absent wire context stays absent.
+//     Correlation IDs cannot issue a parent lease or authorize reverse helpers.
 //   - When the pipe ends, every waiter fails at once with [ErrGone], and a
 //     final frame written before the exit is delivered first.
 //   - A request over the frame cap (8 MiB, the limit plugin-sdk's Serve

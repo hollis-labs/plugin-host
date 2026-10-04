@@ -94,6 +94,8 @@ jobs:
           echo "INTEROP_REPORT=$assets/replay-report.json" >> "$GITHUB_ENV"
           echo "INTEROP_CONTROL_REPORT=$assets/control-report.json" >> "$GITHUB_ENV"
           echo "INTEROP_RECEIVED_REPORT=$assets/received-budget-report.json" >> "$GITHUB_ENV"
+          echo "INTEROP_OBSERVER_REPORT=$assets/observer-report.json" >> "$GITHUB_ENV"
+          echo "INTEROP_AUTHORITY_REPORT=$assets/authority-report.json" >> "$GITHUB_ENV"
           echo "INTEROP_GO_VERSION=$(go version)" >> "$GITHUB_ENV"
           echo "INTEROP_NODE_VERSION=$(node --version)" >> "$GITHUB_ENV"
           echo "INTEROP_DENO_VERSION=$(deno --version | head -1)" >> "$GITHUB_ENV"
@@ -112,11 +114,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: finite-parent-interop-receipts
+          name: bounded-interop-receipts
           path: |
             ${{ runner.temp }}/plugin-host-interop-*/report.json
             ${{ runner.temp }}/plugin-host-interop-*/control-report.json
             ${{ runner.temp }}/plugin-host-interop-*/replay-report.json
             ${{ runner.temp }}/plugin-host-interop-*/received-budget-report.json
+            ${{ runner.temp }}/plugin-host-interop-*/observer-report.json
+            ${{ runner.temp }}/plugin-host-interop-*/authority-report.json
             ${{ runner.temp }}/plugin-host-interop-*/build-receipt
             ${{ runner.temp }}/plugin-host-interop-*/ts-build-receipt
