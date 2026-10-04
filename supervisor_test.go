@@ -181,6 +181,19 @@ func TestStopDuringARestartHandshakeStopsTheNewChild(t *testing.T) {
 	if sup.Current() != nil || ev.starts.Load() != 1 {
 		t.Fatalf("the replacement was installed: starts=%d", ev.starts.Load())
 	}
+	options := lifecycleOptions(t)
+	options.HostInstance = dir
+	controller := newController(t, options)
+	released := false
+	for _, report := range controller.Status().Disposals {
+		if report.Owner.OwnerGeneration == 2 && !report.Incomplete {
+			released = true
+		}
+	}
+	if !released {
+		t.Fatal("canceled replacement retained an active reservation")
+	}
+
 }
 
 func TestStableForRefillsTheBudget(t *testing.T) {
