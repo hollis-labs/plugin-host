@@ -11,6 +11,8 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Added
 
+- `Supervisor.PendingFactory` and `ErrInitFactoryPending` expose host factory
+  work still running after cancellation, including through bounded Stop.
 - Per-plugin `Lifecycle` with staged planning, compatibility checks, persisted
   generation issuance, enable/disable/reload, scope callbacks, dispatch fencing,
   finite classified retries and deterministic disposal reports/quarantine.
@@ -25,6 +27,9 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Changed
 
+- Supervisor factory tuples share Lifecycle's generation ledger across controller
+  recreation; completed disposal releases the active checkpoint without reusing
+  a generation. Explicit ExpectedID must match incarnation.owner_id.
 - Pin protocol 2 to the SDK pseudo-version until a tagged plugin-sdk release carries protocol 2.
 - Default frames are 8 MiB including LF in both directions; profile offers
   are refused until host services and hooks are implemented. Lifecycle methods omit params or send {}.
@@ -53,6 +58,16 @@ refuses a tag whose CHANGELOG has no heading for it.
 - Process and Supervisor errors retain bounded redacted cause text and wrapped
   causes; process-only diagnostics omit generation zero. Classifier panics are
   contained, and exit classification identifies supervisor health kills.
+
+
+- Breaking: Init uses Grants instead of Granted; Spawn requires complete Init
+  authority and reports typed failures. The R12 response cap is 8 MiB.
+- Standalone supervised restarts require InitFactory to issue fresh incarnation
+  tuples and grants; a missing factory ends supervision. Client.Init validates
+  results before returning them.
+- Add FixtureInit and invalid-contract, profile-ack and duplicate-init fixture
+  behaviors for protocol conformance tests.
+
 
 ## v0.1.2 — 2026-10-02
 
@@ -104,11 +119,3 @@ refuses a tag whose CHANGELOG has no heading for it.
   supervision loop releases `Stop`.
 - `Conn.Notify` is bounded by the default call timeout as a write deadline, so
   a plugin that stops reading stdin cannot hold the write lock indefinitely.
-
-- Breaking: Init uses Grants instead of Granted; Spawn requires complete Init
-  authority and reports typed failures. The R12 response cap is 8 MiB.
-- Standalone supervised restarts require InitFactory to issue fresh incarnation
-  tuples and grants; a missing factory ends supervision. Client.Init validates
-  results before returning them.
-- Export FixtureInit and invalid-contract, profile-ack and duplicate-init fixture
-  behaviors for protocol conformance tests.

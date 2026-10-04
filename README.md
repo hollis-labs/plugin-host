@@ -70,7 +70,7 @@ func main() {
 }
 ```
 
-`Start` spawns the process, runs `plugin/init` then `plugin/load`, and returns a `*Process`. `Spawn` validates the complete SDK Init payload before starting a child, leaving the handshake to the host. Required directories, host version and incarnation must be provided. Zero protocol/contract default to 2/1, config defaults to `{}`, and nil grants encode as `[]`. `Supervise` wraps a `Spec` and restarts explicitly classified transient exits through a full handshake with backoff. `Lifecycle` adds staged planning, generation-owned enable/disable/reload and cleanup callbacks; see [the lifecycle contract](docs/lifecycle.md). `guard.Guarded` runs an in-process plugin call under a panic and budget guard.
+`Start` spawns the process, runs `plugin/init` then `plugin/load`, and returns a `*Process`. `Spawn` validates the complete SDK Init payload before starting a child, leaving the handshake to the host. Required directories, host version and incarnation must be provided. Zero protocol/contract default to 2/1, config defaults to `{}`, and nil grants encode as `[]`. `Supervise` requires an `InitFactory` for restarts and wraps a `Spec` to restart explicitly classified transient exits through a full handshake with backoff. `Lifecycle` adds staged planning, generation-owned enable/disable/reload and cleanup callbacks; see [the lifecycle contract](docs/lifecycle.md). `guard.Guarded` runs an in-process plugin call under a panic and budget guard.
 
 ## Compatibility
 
@@ -100,17 +100,17 @@ The tests start real child processes over the real wire: the test binary re-exec
 
 CI (`.github/workflows/check.yml`) is the full gate.
 
-## License
-
-MIT — see [LICENSE](./LICENSE).
-
 Frames default to 8 MiB including LF in both directions. Oversized incoming
-lines are discarded without losing the connection; offers cannot advertise a
-larger frame. Lifecycle methods send absent or empty params, never null. The
-SDK is pinned by pseudo-version until the first plugin-mcp tag.
+lines are discarded without losing the connection; host-services and hooks offers are refused before spawn. Lifecycle methods send absent or empty params, never null. The
+SDK is pinned by pseudo-version until a tagged plugin-sdk release carries protocol 2.
 
 Standalone `Supervise` callers must supply `SuperviseOptions.InitFactory` for
 restarts. It runs on each attempt (including the first), with a monotonically
 increasing attempt number; the host issues a fresh generation and grants.
 Without a factory an unexpected exit is terminal. `Lifecycle` owns and
 replaces `Spec.Init.Incarnation` with its issued tuple.
+
+
+## License
+
+MIT — see [LICENSE](./LICENSE).

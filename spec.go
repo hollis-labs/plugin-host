@@ -23,7 +23,7 @@ const (
 type Spec struct {
 	// ID names the plugin in errors before the child has introduced itself.
 	ID string
-	// ExpectedID defaults to Init.Incarnation.OwnerID and must be nonblank.
+	// ExpectedID defaults to Init.Incarnation.OwnerID and must equal that nonblank ID.
 	// It and ExpectedVersion, when set, are checked after init and before load.
 	// ID itself remains the pre-handshake diagnostic label.
 	ExpectedID      string

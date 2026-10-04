@@ -10,7 +10,8 @@
 // [Client] is a thin typed layer over it, one method per protocol method,
 // passing plugin-sdk's structs through. [Process] owns one OS child: [Spawn]
 // validates Init and starts it without a handshake, [Start] adds [Process.Handshake], and
-// [Process.Stop] ends it. [Supervise] restarts explicitly transient crashes;
+// [Process.Stop] ends it. [Supervise] requires an InitFactory to issue fresh
+// authority for explicitly transient restarts;
 // [HealthGate] is an on-demand cached health verdict for hosts that would
 // rather not probe in the background. [Tail] and [Redact] bound and scrub a
 // plugin's stderr.
@@ -29,7 +30,8 @@
 //
 // Init uses the SDK's protocol-2 DTO and capability contract 1. Structural
 // validation precedes spawn; acknowledgement and identity/version verification
-// precede load. The library does not implement reverse or hooks profiles.
+// precede load. ExpectedID must match incarnation.owner_id. Reverse and hooks
+// profile offers are refused before spawn.
 //
 // # Contracts worth knowing
 //

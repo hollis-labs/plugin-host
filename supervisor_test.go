@@ -495,6 +495,7 @@ func TestNotifyToAPluginThatStoppedReadingIsBoundedAndDoesNotWedgeCalls(t *testi
 func freshInitOptions(spec pluginhost.Spec, o pluginhost.SuperviseOptions) pluginhost.SuperviseOptions {
 	o.InitFactory = func(_ context.Context, attempt uint64) (subprocess.InitParams, error) {
 		params := spec.Init
+		params.Incarnation.HostInstance = spec.Init.DataDir
 		params.Incarnation.OwnerGeneration = attempt
 		return params, nil
 	}

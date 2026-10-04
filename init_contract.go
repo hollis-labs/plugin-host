@@ -22,6 +22,10 @@ func initFailure(s Spec, err error) *Failure {
 			message := "plugin speaks %d, host speaks %d"
 			if typed.Field == "host_info.protocol" {
 				message = "Init requests protocol %d, host requires %d"
+				var rpc *subprocess.RPCError
+				if errors.As(err, &rpc) {
+					message = "host requests protocol %d, plugin requires %d"
+				}
 			}
 			err = errors.Join(err, fmt.Errorf("%w: "+message, ErrProtocolMismatch, typed.Received, typed.Expected))
 		case subprocess.InitCapabilityContractMismatch:
@@ -46,6 +50,9 @@ func validateInitParams(p subprocess.InitParams) error {
 }
 
 func validateInit(s Spec) error {
+	if strings.TrimSpace(s.ExpectedID) != "" && s.ExpectedID != s.Init.Incarnation.OwnerID {
+		return processFailure(s, "identity", ErrIdentityMismatch)
+	}
 	if strings.TrimSpace(s.ExpectedID) == "" {
 		return initFailure(s, &subprocess.InitError{Code: subprocess.InitInvalid, Field: "id"})
 	}

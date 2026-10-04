@@ -240,8 +240,8 @@ R22/R23 use staged registration rollback and a captured callback dispatch gate.
 Each application must test its
 actual registrations, review, durable preference and credential implementation.
 This change includes no application adoption, reverse RPC, hook dispatch, release
-or tag. Hosts requiring a service profile must refuse the visible decline before
-activation; neither profile is available from this driver.
+or tag. Hosts requiring a service profile cannot use this driver yet; supplied offers
+are refused before spawn.
 
 Cancelled callbacks have a 25ms grace to return before being tracked as still
 running. Late results never activate a generation. A failed reload preflight
@@ -259,8 +259,16 @@ revision conflicts with concurrent disposal. Use the actual storage adapter;
 synthetic persistence cases cannot certify these durable guarantees.
 
 
-The base frame default is 8 MiB including LF both ways; host service offers
-may advertise at most that size. Lifecycle calls omit params or encode {}.
+The base frame default is 8 MiB including LF both ways. Host service and hooks
+offers are refused before spawn. Lifecycle calls omit params or encode {}.
 Process conformance R12 checks a 7 MiB response, rejects a 9 MiB response
 and request, and verifies the connection remains usable. Tagged RPC identifiers
 and duplex transport belong to a later SDK adoption.
+
+Supervisor factory tuples reserve into the same process-wide generation ledger
+as Lifecycle. A completed attempt clears its active checkpoint but retains the
+high-water mark, so recreation cannot reuse a generation. `PendingFactory`
+reports factory work still running after cancellation; `Stop` returns
+`ErrInitFactoryPending` while it remains. The host must reconcile external
+factory effects before discarding that supervisor. `ExpectedID`, when supplied,
+must exactly equal the incarnation's owner ID.

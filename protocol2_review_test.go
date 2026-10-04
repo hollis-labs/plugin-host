@@ -45,6 +45,8 @@ func scriptedInitSpec(t *testing.T, result string, raw bool) (pluginhost.Spec, s
 			}
 		}
 	})
+	params := pluginhosttest.FixtureInit(dir, filepath.Join(dir, "cache"))
+	params.Incarnation.OwnerID = "probe"
 	rl := "0"
 	if raw {
 		rl = "1"
@@ -53,7 +55,7 @@ func scriptedInitSpec(t *testing.T, result string, raw bool) (pluginhost.Spec, s
 		ID: "probe", ExpectedID: "probe", ExpectedVersion: "1.0.0",
 		Command: "/bin/sh", Args: []string{"-c", scriptedInitChild},
 		Env:              []string{"PATH=/usr/bin:/bin", "DIR=" + dir, "RESULT=" + result, "RAWLINE=" + rl},
-		Init:             pluginhosttest.FixtureInit(dir, filepath.Join(dir, "cache")),
+		Init:             params,
 		HandshakeTimeout: 5 * time.Second, UnloadTimeout: time.Second, ReapTimeout: 2 * time.Second,
 	}, dir
 }
@@ -194,6 +196,7 @@ func TestSupervisorWithoutInitFactoryIsTerminal(t *testing.T) {
 
 func TestSupervisorRefusesReusedIncarnation(t *testing.T) {
 	spec, _ := fixtureSpec(t, pluginhosttest.BehaviourEcho)
+	spec.Init.Incarnation.HostInstance = spec.Init.DataDir
 	ev := newEvents()
 	options := ev.options(fastPolicy(3))
 	options.InitFactory = func(context.Context, uint64) (subprocess.InitParams, error) { return spec.Init, nil }
@@ -262,12 +265,14 @@ func TestPreSpawnFailureStepSurvivesStartAndLifecycle(t *testing.T) {
 
 func TestSupervisorFactoryIssuesFreshGrants(t *testing.T) {
 	spec, _ := fixtureSpec(t, pluginhosttest.BehaviourEcho)
+	spec.Init.Incarnation.HostInstance = spec.Init.DataDir
 	ev := newEvents()
 	options := ev.options(fastPolicy(1))
 	options.InitFactory = func(_ context.Context, attempt uint64) (subprocess.InitParams, error) {
 		params := spec.Init
 		params.Incarnation.OwnerGeneration = attempt
 		grant := testGrant()
+		grant.HostInstance = params.Incarnation.HostInstance
 		grant.OwnerGeneration = attempt
 		grant.GrantID = "grant-" + strconv.FormatUint(attempt, 10)
 		params.Grants = capability.GrantSet{grant}
@@ -352,5 +357,265 @@ func TestManualInitRefusesOffersWithoutSending(t *testing.T) {
 	var typed *subprocess.InitError
 	if !errors.As(err, &typed) || typed.Code != subprocess.InitProfileMismatch || len(recordedInitMethods(dir)) != 0 {
 		t.Fatalf("unsupported offer sent: %v", err)
+	}
+}
+
+func TestSupervisorGenerationLedgerSurvivesRecreation(t *testing.T) {
+	spec, _ := fixtureSpec(t, pluginhosttest.BehaviourEcho)
+	options := freshInitOptions(spec, pluginhost.SuperviseOptions{})
+	first := pluginhost.Supervise(spec, options)
+	if err := first.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	second := pluginhost.Supervise(spec, options)
+	if err := second.Start(context.Background()); !errors.Is(err, pluginhost.ErrInvalidGeneration) {
+		t.Fatalf("recreated supervisor reused generation: %v", err)
+	}
+	_ = second.Stop(context.Background())
+}
+
+func TestSupervisorAndLifecycleShareGenerationLedger(t *testing.T) {
+	for _, supervisorFirst := range []bool{false, true} {
+		t.Run(strconv.FormatBool(supervisorFirst), func(t *testing.T) {
+			spec, _ := fixtureSpec(t, pluginhosttest.BehaviourEcho)
+			spec.ExpectedVersion = "1.0.0"
+			options := lifecycleOptions(t)
+			epoch := options.HostInstance
+			options.Callbacks.Plan = func(context.Context) (pluginhost.Plan, error) { return pluginhost.Plan{Spec: spec}, nil }
+			lifecycle := newController(t, options)
+			factory := pluginhost.SuperviseOptions{InitFactory: func(context.Context, uint64) (subprocess.InitParams, error) {
+				p := spec.Init
+				p.Incarnation.HostInstance = epoch
+				return p, nil
+			}}
+			sup := pluginhost.Supervise(spec, factory)
+			t.Cleanup(func() { _ = sup.Stop(context.Background()) })
+			if supervisorFirst {
+				if err := sup.Start(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				if err := lifecycle.Enable(context.Background()); !errors.Is(err, pluginhost.ErrInvalidGeneration) {
+					t.Fatalf("lifecycle reused live supervisor tuple: %v", err)
+				}
+				if err := sup.Stop(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, report := range lifecycle.Status().Disposals {
+					if report.Owner.OwnerGeneration == 1 && !report.Incomplete && report.ID != "" {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatal("stopped supervisor left no completed disposal record")
+				}
+				// Completed disposal clears Active but never lowers the generation watermark.
+				store := &pluginhost.MemoryLifecycleStateStore{}
+				options.StateStore = store
+				next := newController(t, options)
+				if err := next.Enable(context.Background()); err != nil {
+					t.Fatalf("released reservation quarantined lifecycle: %v", err)
+				}
+				if next.Status().Owner.OwnerGeneration != 2 {
+					t.Fatal("generation watermark lost")
+				}
+			} else {
+				enableController(t, lifecycle)
+				if err := sup.Start(context.Background()); !errors.Is(err, pluginhost.ErrInvalidGeneration) {
+					t.Fatalf("supervisor reused live lifecycle tuple: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestSupervisorFactoryRefusesHostAndOwnerChanges(t *testing.T) {
+	for _, host := range []bool{false, true} {
+		t.Run(strconv.FormatBool(host), func(t *testing.T) {
+			spec, _ := fixtureSpec(t, pluginhosttest.BehaviourEcho)
+			ev := newEvents()
+			options := freshInitOptions(spec, ev.options(fastPolicy(1)))
+			original := options.InitFactory
+			options.InitFactory = func(ctx context.Context, attempt uint64) (subprocess.InitParams, error) {
+				p, err := original(ctx, attempt)
+				if attempt > 1 {
+					if host {
+						p.Incarnation.HostInstance = "other-epoch"
+					} else {
+						p.Incarnation.OwnerID = "other-owner"
+					}
+				}
+				return p, err
+			}
+			sup := pluginhost.Supervise(spec, options)
+			if err := sup.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = sup.Stop(context.Background()) })
+			_ = sup.Current().Kill()
+			if err := awaitResult(t, ev.giveUp); err == nil {
+				t.Fatal("foreign incarnation accepted")
+			}
+			if ev.starts.Load() != 1 || sup.Current() != nil {
+				t.Fatal("foreign incarnation spawned replacement")
+			}
+		})
+	}
+}
+
+func TestPluginProtocolRejectionDiagnosticDirection(t *testing.T) {
+	wire := `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"init rejected","data":{"contract":"plugin-init/2","code":"protocol_mismatch","field":"host_info.protocol","expected":3,"received":2}}}`
+	spec, _ := scriptedInitSpec(t, wire, true)
+	_, err := pluginhost.Start(context.Background(), spec)
+	if !errors.Is(err, pluginhost.ErrProtocolMismatch) || !strings.Contains(err.Error(), "host requests protocol 2, plugin requires 3") {
+		t.Fatalf("diagnostic reversed: %v", err)
+	}
+}
+
+func TestSupervisorNoFactoryPreservesClassifierCause(t *testing.T) {
+	spec, _ := fixtureSpec(t, pluginhosttest.BehaviourEcho)
+	reason := errors.New("host classified exit")
+	ev := newEvents()
+	options := ev.options(fastPolicy(1))
+	options.ClassifyExit = func(pluginhost.ExitInfo) error { return reason }
+	sup := pluginhost.Supervise(spec, options)
+	if err := sup.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sup.Stop(context.Background()) })
+	_ = sup.Current().Kill()
+	err := awaitResult(t, ev.giveUp)
+	if !errors.Is(err, reason) || !errors.Is(err, pluginhost.ErrInitFactoryRequired) {
+		t.Fatalf("give-up cause lost: %v", err)
+	}
+}
+
+func TestSupervisorNoFactoryPreservesHealthKill(t *testing.T) {
+	spec, _ := fixtureSpec(t, pluginhosttest.BehaviourEcho)
+	ev := newEvents()
+	options := ev.options(fastPolicy(1))
+	options.HealthInterval = 50 * time.Millisecond
+	options.KillAfterUnhealthy = 1
+	sup := pluginhost.Supervise(spec, options)
+	if err := sup.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sup.Stop(context.Background()) })
+	tool(t, sup.Current(), "set_health", map[string]any{"ok": false})
+	err := awaitResult(t, ev.giveUp)
+	if !errors.Is(err, pluginhost.ErrUnhealthy) || !errors.Is(err, pluginhost.ErrInitFactoryRequired) {
+		t.Fatalf("health-kill cause lost: %v", err)
+	}
+}
+
+func TestSupervisorBlockingFactoryIsTrackedAndBounded(t *testing.T) {
+	spec, _ := fixtureSpec(t, pluginhosttest.BehaviourEcho)
+	spec.HandshakeTimeout = 40 * time.Millisecond
+	entered, release := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	calls := 0
+	options := pluginhost.SuperviseOptions{InitFactory: func(context.Context, uint64) (subprocess.InitParams, error) {
+		calls++
+		close(entered)
+		<-release
+		return spec.Init, nil
+	}}
+	sup := pluginhost.Supervise(spec, options)
+	result := make(chan error, 1)
+	go func() { result <- sup.Start(context.Background()) }()
+	<-entered
+	err := awaitResult(t, result)
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, pluginhost.ErrInitFactoryPending) || !sup.PendingFactory() {
+		t.Fatalf("untracked callback: %v", err)
+	}
+	if err := sup.Start(context.Background()); !errors.Is(err, pluginhost.ErrInitFactoryPending) {
+		t.Fatalf("pending factory reentered: %v", err)
+	}
+	if calls != 1 {
+		t.Fatal("callback repeated before completion")
+	}
+	if err := sup.Stop(context.Background()); !errors.Is(err, pluginhost.ErrInitFactoryPending) {
+		t.Fatalf("Stop hid pending work: %v", err)
+	}
+	close(release)
+	eventually(t, time.Second, "factory completion", func() bool { return !sup.PendingFactory() })
+	if sup.Current() != nil {
+		t.Fatal("late result spawned a child")
+	}
+	if err := sup.Stop(context.Background()); err != nil {
+		t.Fatalf("completed factory still pending: %v", err)
+	}
+
+}
+
+func TestSupervisorPendingRestartFactoryReachesGiveUp(t *testing.T) {
+	spec, _ := fixtureSpec(t, pluginhosttest.BehaviourEcho)
+	spec.HandshakeTimeout = 200 * time.Millisecond
+	ev := newEvents()
+	options := freshInitOptions(spec, ev.options(fastPolicy(1)))
+	original := options.InitFactory
+	entered, release := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	options.InitFactory = func(ctx context.Context, attempt uint64) (subprocess.InitParams, error) {
+		if attempt > 1 {
+			close(entered)
+			<-release
+		}
+		return original(ctx, attempt)
+	}
+	sup := pluginhost.Supervise(spec, options)
+	if err := sup.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_ = sup.Current().Kill()
+	<-entered
+	err := awaitResult(t, ev.giveUp)
+	if !errors.Is(err, pluginhost.ErrInitFactoryPending) || !sup.PendingFactory() || sup.Current() != nil {
+		t.Fatalf("give-up hid factory: %v", err)
+	}
+	if err := sup.Stop(context.Background()); !errors.Is(err, pluginhost.ErrInitFactoryPending) {
+		t.Fatal(err)
+	}
+	close(release)
+	eventually(t, time.Second, "restart factory completion", func() bool { return !sup.PendingFactory() })
+	if sup.Current() != nil {
+		t.Fatal("late restart activated")
+	}
+
+}
+
+func TestSupervisorFactoryPanicIsContained(t *testing.T) {
+	spec, _ := fixtureSpec(t, pluginhosttest.BehaviourEcho)
+	sup := pluginhost.Supervise(spec, pluginhost.SuperviseOptions{InitFactory: func(context.Context, uint64) (subprocess.InitParams, error) { panic("secret factory panic") }})
+	err := sup.Start(context.Background())
+	if !errors.Is(err, pluginhost.ErrCallbackPanic) || strings.Contains(err.Error(), "secret factory panic") || sup.PendingFactory() {
+		t.Fatalf("panic not contained: %v", err)
+	}
+	if err := sup.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExpectedIdentityMustMatchIncarnation(t *testing.T) {
+	spec, dir := scriptedInitSpec(t, `{"id":"other","name":"P","version":"1.0.0","description":"","protocol":2,"capability_contract":1}`, false)
+	spec.ExpectedID = "other"
+	_, err := pluginhost.Start(context.Background(), spec)
+	if !errors.Is(err, pluginhost.ErrIdentityMismatch) || initChildState(dir) != "no-pid-file" {
+		t.Fatalf("foreign expected id reached spawn: %v", err)
 	}
 }
