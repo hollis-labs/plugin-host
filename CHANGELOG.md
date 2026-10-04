@@ -25,6 +25,13 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Added
 
+- `Supervisor.Status`, `SupervisorStatus`, and shared `ExitStatus` expose typed
+  restart exhaustion, terminal failure and the last reaped child's owner, exit
+  information and bounded stderr tail. `LifecycleStatus.LastExit` retains the
+  same diagnostics across automatic recovery; explicit attempt cycles reset it.
+  Tails apply secret and host redaction and remain bounded after host redaction.
+  Status summaries surface restart exhaustion and exit code/signal. Document
+  host responsibility for children orphaned after host death without unload.
 - `MismatchError` carries bounded printable expected/actual identity and version
   metadata while retaining mismatch sentinels. Lifecycle failures preserve the
   nested redacted mismatch diagnostic and typed cause.

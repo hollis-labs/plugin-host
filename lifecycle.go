@@ -91,8 +91,11 @@ type LifecycleStatus struct {
 	RetryAttempts  int
 	OriginFailure  *Failure
 	Exhausted      bool
-	Disposal       DisposalReport
-	Disposals      []DisposalReport
+	// LastExit is the last failed, reaped child in this attempt cycle, including a
+	// failed candidate; automatic recovery retains it, Enable/Reload reset it.
+	LastExit  *ExitStatus
+	Disposal  DisposalReport
+	Disposals []DisposalReport
 }
 
 type incarnation struct {
@@ -175,6 +178,7 @@ func (l *Lifecycle) Status() LifecycleStatus {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	s := l.status
+	s.LastExit = cloneExitStatus(s.LastExit)
 	s.Disposals = l.history().Disposals
 	s.Disposal.Failures = slices.Clone(s.Disposal.Failures)
 	if s.LastFailure != nil {
@@ -572,6 +576,7 @@ func (l *Lifecycle) load(ctx context.Context, rev uint64, p Plan) *Failure {
 			i.failures = append(i.failures, CleanupFailure{Step: step, Cause: e})
 		}
 		l.dispose(i)
+		l.recordExit(i.process)
 		return f
 	}
 	if l.opts.Callbacks.PrepareScope != nil {
@@ -707,6 +712,7 @@ func (l *Lifecycle) watch(ctx context.Context, i *incarnation) {
 		return
 	}
 	info, _ := i.process.ExitInfo()
+	l.recordExit(i.process)
 	var err = ErrGone
 	if l.opts.ClassifyExit != nil {
 		_, err = loadValue(ctx, l, func(c context.Context) (struct{}, error) { return struct{}{}, l.opts.ClassifyExit(info) })
@@ -751,7 +757,11 @@ func (l *Lifecycle) watch(ctx context.Context, i *incarnation) {
 
 // String provides a bounded status summary without callback/config contents.
 func (s LifecycleStatus) String() string {
-	return fmt.Sprintf("%s generation %d desired=%t", s.State, s.Owner.OwnerGeneration, s.DesiredEnabled)
+	text := fmt.Sprintf("%s generation %d desired=%t", s.State, s.Owner.OwnerGeneration, s.DesiredEnabled)
+	if s.Exhausted {
+		text += " restart attempts exhausted"
+	}
+	return exitSummary(text, s.LastExit)
 }
 
 func (l *Lifecycle) detach() *incarnation {
@@ -767,6 +777,7 @@ func (l *Lifecycle) resetAttempts() {
 	l.mu.Lock()
 	l.status.OriginFailure = nil
 	l.status.Exhausted = false
+	l.status.LastExit = nil
 	l.status.RetryAttempts = 0
 	l.mu.Unlock()
 }
