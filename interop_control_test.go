@@ -36,12 +36,11 @@ func TestInteropControlBridge(t *testing.T) {
 		return
 	}
 	if err := runInteropBridge(); err != nil {
-		var childExit *interopWorkerExit
-		if errors.As(err, &childExit) {
+		if childExit, ok := err.(*interopWorkerExit); ok { //nolint:errorlint // Only a sole worker exit is natural; joined observer failures must remain fatal.
 			os.Exit(childExit.code)
 		}
 		fmt.Fprintln(os.Stderr, "interop harness failure:", err)
-		os.Exit(1)
+		os.Exit(125)
 	}
 	os.Exit(0)
 }
@@ -199,16 +198,12 @@ func runInteropBridge() error {
 			result = err
 		}
 	}
-	// Wait joins the stderr copier. Flush even the final event already removed
-	// from the queue before closing the socket and publishing process exit.
-	close(events)
-	select {
-	case <-eventsDone:
-	case <-time.After(2 * time.Second):
-		return errors.New("event drain timeout")
-	}
+	// Stop control reads without closing the event write half. Required control
+	// failures discovered after worker exit must reach the observer before EOF.
 	controlClosing.Store(true)
-	_ = socket.Close()
+	if err := socket.(*net.UnixConn).CloseRead(); err != nil {
+		result = errors.Join(result, err)
+	}
 	select {
 	case <-controlDone:
 	case <-time.After(time.Second):
@@ -216,10 +211,32 @@ func runInteropBridge() error {
 	}
 	select {
 	case late := <-failures:
-		return errors.Join(result, late)
+		result = errors.Join(result, late)
 	default:
-		return result
 	}
+	if result != nil {
+		if _, natural := result.(*interopWorkerExit); !natural { //nolint:errorlint // A wrapped/joined worker exit also carries a harness failure.
+			raw, err := json.Marshal(map[string]any{"fixture_event": map[string]any{"kind": "control_failure", "error": result.Error()}})
+			if err == nil {
+				_, err = observer.Write(append(raw, '\n'))
+			}
+			result = errors.Join(result, err)
+		}
+	}
+	// Wait joins the stderr copier; the input and control observers are joined.
+	// Flush every final event before closing the write half and publishing exit.
+	close(events)
+	select {
+	case <-eventsDone:
+	case <-time.After(2 * time.Second):
+		return errors.New("event drain timeout")
+	}
+	select {
+	case late := <-failures:
+		result = errors.Join(result, late)
+	default:
+	}
+	return result
 }
 
 type interopEventWriter struct {
@@ -299,16 +316,17 @@ func (w *interopEventWriter) failure() error {
 }
 
 type interopControls struct {
-	socket        net.Conn
-	events        chan map[string]json.RawMessage
-	failure       chan error
-	seq           int
-	pending       []map[string]json.RawMessage
-	trace         []string
-	observed      []map[string]json.RawMessage
-	observedBytes int
-	eventBytes    atomic.Int64
-	eventCount    atomic.Int64
+	expandedReverseLimit uint32
+	socket               net.Conn
+	events               chan map[string]json.RawMessage
+	failure              chan error
+	seq                  int
+	pending              []map[string]json.RawMessage
+	trace                []string
+	observed             []map[string]json.RawMessage
+	observedBytes        int
+	eventBytes           atomic.Int64
+	eventCount           atomic.Int64
 }
 
 func (c *interopControls) record(e map[string]json.RawMessage) error {
@@ -444,6 +462,12 @@ func (c *interopControls) finish(expectedCode int) error {
 			}
 			if exits != 1 || finished != 1 {
 				return fmt.Errorf("harness terminal receipts exits=%d finished=%d", exits, finished)
+			}
+			if err := interopWireTerminals(c.observed, expectedCode); err != nil {
+				return err
+			}
+			if c.expandedReverseLimit != 0 {
+				return interopExpandedHelpers(c.observed, c.expandedReverseLimit)
 			}
 			return nil
 		case <-timer.C:

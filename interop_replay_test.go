@@ -155,6 +155,7 @@ func startInteropExpanded(t *testing.T, runtime string, recipe interopRecipeRow,
 		s.ConnOptions = append(s.ConnOptions, WithDefaultTimeout(0))
 	}
 	p, c := spawnInteropChild(t, runtime, recipe.Profile, b.services(), s)
+	c.expandedReverseLimit = s.Init.HostServices.Limits.PluginToHostInflight
 	if _, err := c.event("ready"); err != nil {
 		t.Fatal(err)
 	}
