@@ -220,6 +220,7 @@ func TestReservedCancellationSurvivesSustainedLargeWrites(t *testing.T) {
 			wanted := map[subprocess.RPCID]bool{}
 			for i := range calls {
 				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
 				cancels[i] = cancel
 				results[i] = callAsync(ctx, p.conn, "work")
 				wanted[p.request().ID] = true
