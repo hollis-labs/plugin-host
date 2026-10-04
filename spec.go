@@ -55,6 +55,10 @@ type Spec struct {
 	// LogLevel = "info", PluginDir = Dir.
 	Init subprocess.InitParams
 
+	// Reverse explicitly enables an offered optional reverse profile. Nil refuses
+	// offers. Each spawn/restart creates fresh authenticated sessions.
+	Reverse *ReverseProfile
+
 	// HandshakeTimeout bounds [Process.Handshake] even when the caller's
 	// context has no deadline (default 10s). UnloadTimeout is the graceful
 	// budget of [Process.Stop]: the plugin/unload call and the wait for exit

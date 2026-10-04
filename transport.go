@@ -22,10 +22,13 @@ const lifecycleCallLimit = 2
 const physicalWriteTimeout = 5 * time.Second
 
 type callReply struct {
-	response subprocess.RPCResponse
-	err      error
+	response   subprocess.RPCResponse
+	initResult *subprocess.InitResult
+	err        error
 }
 type pendingCall struct {
+	session   *HostSession
+	prepared  *preparedHostBinding
 	method    string
 	ctx       context.Context
 	end       context.CancelFunc
@@ -43,6 +46,7 @@ type outboundFrame struct {
 	written   chan error
 	cancel    bool
 	inboundID subprocess.RPCID
+	receipt   *reverseReceipt
 }
 
 func lifecycleMethod(method string) bool {
@@ -58,8 +62,8 @@ func (c *Conn) signalWriter() {
 func (c *Conn) queueCall(ctx context.Context, method string, params any) (*pendingCall, error) {
 	call := &pendingCall{ctx: ctx, method: method, reply: make(chan callReply, 1), lifecycle: lifecycleMethod(method)}
 	c.mu.Lock()
-	if c.closedBy != nil {
-		err := c.closedBy
+	if c.closedBy != nil || c.configError != nil {
+		err := errors.Join(c.closedBy, c.configError)
 		c.mu.Unlock()
 		return nil, err
 	}
@@ -79,8 +83,37 @@ func (c *Conn) queueCall(ctx context.Context, method string, params any) (*pendi
 	*count++
 	call.credit = credit
 	c.mu.Unlock()
+	if method == subprocess.MethodInit {
+		if c.reverse == nil {
+			fields, _, initErr := forwardFields(params)
+			if initErr == nil {
+				initErr = refuseProfileOffer(fields)
+			}
+			if initErr != nil {
+				c.releaseCall(call)
+				return nil, initErr
+			}
+		} else {
+			raw, initErr := json.Marshal(params)
+			if initErr == nil {
+				var p subprocess.InitParams
+				initErr = json.Unmarshal(raw, &p)
+				if initErr == nil {
+					initErr = c.validateInit(p)
+				}
+			}
+			if initErr != nil {
+				c.releaseCall(call)
+				return nil, initErr
+			}
+		}
+	}
 	params, ctx, end, err := prepareForwardCall(ctx, method, params)
 	call.ctx, call.end = ctx, end
+	if err == nil {
+		params, err = c.prepareParent(call, params)
+		ctx = call.ctx
+	}
 	if err != nil {
 		c.releaseCall(call)
 		return nil, err
@@ -127,6 +160,7 @@ func (c *Conn) releaseCall(call *pendingCall) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.retireParentLocked(call)
 	delete(c.pending, call.id)
 	if call.frame != nil && c.queue.remove(call.frame) {
 		delete(c.outbound, call.frame)
@@ -145,6 +179,7 @@ func (c *Conn) releaseCall(call *pendingCall) {
 func (c *Conn) cancelQueuedCall(call *pendingCall, cause error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.retireParentLocked(call)
 	if len(call.reply) > 0 {
 		return
 	}
@@ -248,6 +283,7 @@ func (c *Conn) write() {
 		}
 		out := c.outbound[frame]
 		delete(c.outbound, frame)
+		c.activeReceipt = out.receipt
 		var err error
 		if out.ctx != nil {
 			err = out.ctx.Err()
@@ -267,7 +303,24 @@ func (c *Conn) write() {
 		if err == nil && out.call != nil {
 			out.call.id, err = c.allocateID()
 			if err == nil {
-				c.pending[out.call.id] = out.call
+				if out.call.method == subprocess.MethodUnload {
+					c.revokeBusinessLocked()
+					if c.reverse != nil {
+						c.reverse.unloading = true
+					}
+				}
+				if out.call.session != nil {
+					id, ok := out.call.id.Integer()
+					deadline, _ := out.call.ctx.Deadline()
+					if !ok || id <= 0 {
+						err = ErrRequestIDExhausted
+					} else {
+						err = out.call.session.attachParent(uint64(id), out.call.method, deadline, out.call.prepared)
+					}
+				}
+				if err == nil {
+					c.pending[out.call.id] = out.call
+				}
 				for i := range 16 {
 					frame.wire[out.idSlot+i] = ' '
 				}
@@ -280,10 +333,17 @@ func (c *Conn) write() {
 		}
 		c.mu.Lock()
 		c.queue.complete(frame)
+		if err != nil && out.call != nil {
+			c.retireParentLocked(out.call)
+		}
+		if out.receipt != nil {
+			out.receipt.finishLocked(c)
+		}
+		c.activeReceipt = nil
 		if out.call != nil && out.call.frame == frame {
 			out.call.frame = nil
 		}
-		if out.inboundID != (subprocess.RPCID{}) {
+		if out.receipt == nil && out.inboundID != (subprocess.RPCID{}) {
 			delete(c.inboundActive, out.inboundID)
 		}
 		c.mu.Unlock()
@@ -304,12 +364,12 @@ func (c *Conn) writeFrame(wire []byte, out *outboundFrame) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	deadline := time.Now().Add(physicalWriteTimeout)
+	deadline := time.Now().Add(c.writeTimeout)
 	if callDeadline, ok := ctx.Deadline(); ok && callDeadline.Before(deadline) {
 		deadline = callDeadline
 	}
 	if out.cancel {
-		deadline = time.Now().Add(cancelWriteTimeout)
+		deadline = time.Now().Add(min(cancelWriteTimeout, c.writeTimeout))
 	}
 	c.mu.Lock()
 	closed := c.closedBy
@@ -360,7 +420,7 @@ func (c *Conn) writeFrame(wire []byte, out *outboundFrame) error {
 	return wrapped
 }
 
-// No reverse profile is enabled in this slice. Inbound requests receive a
+// Without a selected reverse profile, inbound requests receive a
 // bounded refusal, while notifications have no effect. This direction never
 // consults outgoing pending calls, even when the numeric IDs coincide.
 func (c *Conn) refuseInbound(request wireEnvelope) {

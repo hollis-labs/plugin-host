@@ -80,11 +80,7 @@ func prepareForwardCall(ctx context.Context, method string, params any) (any, co
 	if err != nil {
 		return nil, ctx, end, err
 	}
-	if method == subprocess.MethodInit {
-		if err = refuseProfileOffer(fields); err != nil {
-			return nil, ctx, end, err
-		}
-	}
+
 	if supplied != nil {
 		limit := time.Now().Add(time.Duration(supplied.TimeoutMS) * time.Millisecond)
 		if deadline, ok := ctx.Deadline(); !ok || limit.Before(deadline) {

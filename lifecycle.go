@@ -458,6 +458,9 @@ func (l *Lifecycle) Disable(ctx context.Context) error {
 	l.mu.Lock()
 	l.status.DesiredEnabled = false
 	l.revision++
+	if l.current != nil {
+		l.current.process.conn.RevokeHostServices()
+	}
 	previous := l.disableBarrier
 	completed := make(chan struct{})
 	l.disableBarrier = completed
@@ -627,6 +630,10 @@ func (l *Lifecycle) load(ctx context.Context, rev uint64, p Plan) *Failure {
 		l.mu.Unlock()
 		return fail("fence", ErrDisabled)
 	}
+	if err := i.process.conn.ActivateHostServices(); err != nil {
+		l.mu.Unlock()
+		return fail("activate", err)
+	}
 	l.current = i
 	l.status.State = StateRunning
 	l.status.LastFailure = nil
@@ -644,6 +651,9 @@ func (l *Lifecycle) dispose(i *incarnation) {
 	l.mu.Lock()
 	l.status.State = StateStarting
 	l.mu.Unlock() // fence before host callbacks
+	if i.process != nil {
+		i.process.conn.RevokeHostServices()
+	}
 	r := DisposalReport{Owner: i.owner, Failures: slices.Clone(i.failures), Incomplete: len(i.pending) > 0}
 	pending := slices.Clone(i.pending)
 	run := func(step string, fn func(context.Context) error) {
@@ -768,6 +778,9 @@ func (l *Lifecycle) detach() *incarnation {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	old := l.current
+	if old != nil {
+		old.process.conn.RevokeHostServices()
+	}
 	l.current = nil
 	return old
 }
@@ -787,12 +800,21 @@ func snapshotSpec(s Spec) Spec {
 	s.Env = slices.Clone(s.Env)
 	s.Secrets = slices.Clone(s.Secrets)
 	s.ConnOptions = slices.Clone(s.ConnOptions)
+	s.Reverse = cloneReverseProfile(s.Reverse)
 	s.Init.Config = maps.Clone(s.Init.Config)
 	s.Init.Grants = slices.Clone(s.Init.Grants)
 	for i := range s.Init.Grants {
 		s.Init.Grants[i].Scope = slices.Clone(s.Init.Grants[i].Scope)
 	}
 	s.Init.Identity = slices.Clone(s.Init.Identity)
+	if s.Init.Context != nil {
+		fc := *s.Init.Context
+		if fc.BindingID != nil {
+			b := *fc.BindingID
+			fc.BindingID = &b
+		}
+		s.Init.Context = &fc
+	}
 	if s.Init.HostServices != nil {
 		h := *s.Init.HostServices
 		h.Methods = slices.Clone(h.Methods)

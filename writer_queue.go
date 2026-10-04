@@ -107,6 +107,11 @@ func (q *frameQueue) enqueueOwned(lane writerLane, wire []byte) (*queuedFrame, e
 func (c *terminalCredit) terminal(success, fallback []byte) (*queuedFrame, error) {
 	success = append([]byte(nil), success...)
 	fallback = append([]byte(nil), fallback...)
+	return c.terminalOwned(success, fallback)
+}
+
+// terminalOwned transfers immutable encoded frames without copying under Conn.
+func (c *terminalCredit) terminalOwned(success, fallback []byte) (*queuedFrame, error) {
 	q := c.queue
 	q.mu.Lock()
 	defer q.mu.Unlock()

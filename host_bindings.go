@@ -52,8 +52,8 @@ type hostActiveCall struct {
 // HostSession is connection-authenticated bookkeeping owned by host code.
 // Its random connection identity cannot be chosen by a plugin. Close/Revoke
 // fences immediately and cancels descendants without waiting for callbacks.
-// Host lifecycle adapters must call Revoke before teardown and Close on every
-// disconnect/crash; automatic Conn/lifecycle wiring is a later slice.
+// Explicit ReverseProfile wiring calls Revoke before business teardown and
+// Close on disconnect/crash; a separate cleanup session permits bounded log.
 // The zero value has no authority; construct through OpenSession.
 type HostSession struct {
 	mu               sync.Mutex
@@ -433,6 +433,98 @@ func (s *HostSession) cancelPluginRequest(owner subprocess.HostRPCRequestOwner, 
 	defer s.mu.Unlock()
 	if call, exists := s.active[id]; exists {
 		call.cancel()
+	}
+	return nil
+}
+
+// preparedHostBinding owns bounded copied host metadata and entropy. Preparation
+// never runs in the writer. Attachment's lock order is Conn -> session -> queue;
+// no session path calls back into Conn while holding the session mutex.
+type preparedHostBinding struct {
+	id     subprocess.BindingID
+	record *hostBindingRecord
+}
+
+func (s *HostSession) prepareBinding(spec HostBinding) (*preparedHostBinding, error) {
+	if len(spec.Scope) == 0 || len(spec.Scope) > 1<<20 || strictjson.Validate(spec.Scope) != nil || bytes.Equal(bytes.TrimSpace(spec.Scope), []byte("null")) {
+		return nil, hostRefusal(capability.InvalidRequest, "")
+	}
+	for _, b := range []*uint64{spec.Budgets.Bytes, spec.Budgets.Effects, spec.Budgets.Tokens} {
+		if b != nil && *b > capability.MaxSafeInteger {
+			return nil, hostRefusal(capability.InvalidRequest, "")
+		}
+	}
+	if spec.Depth >= 8 {
+		return nil, hostRefusal(capability.BudgetExceeded, capability.DepthExceeded)
+	}
+	spec = cloneHostBinding(spec)
+	id, err := randomBinding()
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.runtime == nil {
+		return nil, hostRefusal(capability.TargetUnavailable, "")
+	}
+	for _, owner := range spec.Origin {
+		if owner == s.owner {
+			return nil, hostRefusal(capability.ScopeDenied, capability.CallbackCycle)
+		}
+	}
+	grant, ok := s.grants[spec.GrantID]
+	if !ok {
+		return nil, hostRefusal(capability.CapabilityDenied, "")
+	}
+	expires, err := time.Parse(time.RFC3339Nano, grant.ExpiresAt)
+	if err != nil {
+		return nil, err
+	}
+	issued, err := time.Parse(time.RFC3339Nano, grant.IssuedAt)
+	if err != nil || time.Now().Before(issued) {
+		return nil, hostRefusal(capability.CapabilityDenied, "")
+	}
+	expiry := earliest(spec.Deadline, expires, time.Now().Add(maxBindingLease))
+	if !time.Now().Before(expiry) {
+		return nil, hostRefusal(capability.TargetUnavailable, "")
+	}
+	return &preparedHostBinding{id: id, record: &hostBindingRecord{spec: spec, grant: grant, expiry: expiry}}, nil
+}
+func (s *HostSession) attachParent(id uint64, method string, deadline time.Time, prepared *preparedHostBinding) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.runtime == nil || id == 0 || id > capability.MaxSafeInteger || id <= s.highWater || !time.Now().Before(deadline) {
+		return hostRefusal(capability.TargetUnavailable, capability.ParentInvalid)
+	}
+	if len(s.parents) >= 18 {
+		return hostRefusal(capability.RateLimited, "")
+	}
+	if prepared != nil {
+		grant, ok := s.grants[prepared.record.spec.GrantID]
+		if !ok || !sameGrant(grant, prepared.record.grant) {
+			return hostRefusal(capability.CapabilityDenied, "")
+		}
+		now := time.Now()
+		for key, b := range s.bindings {
+			if !now.Before(b.expiry) {
+				delete(s.bindings, key)
+			}
+		}
+		if len(s.bindings) >= maxHostBindings {
+			return hostRefusal(capability.RateLimited, "")
+		}
+		if !now.Before(prepared.record.expiry) {
+			return hostRefusal(capability.TargetUnavailable, "")
+		}
+	}
+	parent := &hostParent{method: method, deadline: deadline}
+	s.highWater = id
+	s.parents[id] = parent
+	if prepared != nil {
+		prepared.record.parent = parent
+		prepared.record.spec.Parent = subprocess.ParentCall{RequestOwner: subprocess.HostRPCOwnerHost, ID: id}
+		prepared.record.expiry = earliest(prepared.record.expiry, deadline)
+		s.bindings[prepared.id] = prepared.record
 	}
 	return nil
 }

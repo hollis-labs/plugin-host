@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/hollis-labs/plugin-host/internal/strictjson"
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
 type wireEnvelope struct {
+	receivedAt    time.Time
 	id            subprocess.RPCID
+	params        json.RawMessage
 	method        string
 	request       bool
 	response      subprocess.RPCResponse
@@ -57,6 +60,7 @@ func decodeWireEnvelope(raw []byte) (wireEnvelope, error) {
 		if id, present := fields["id"]; present && bytes.Equal(bytes.TrimSpace(id), []byte("null")) {
 			return frame, errors.New("null request id")
 		}
+		frame.params = fields["params"]
 		frame.request = true
 		return frame, nil
 	}
