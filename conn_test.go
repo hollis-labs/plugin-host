@@ -2,6 +2,7 @@ package pluginhost
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -421,5 +422,107 @@ func TestConnInboundMemoryStaysBoundedByTheCapNotTheLine(t *testing.T) {
 	}
 	if c.InboundDropped() != 1 {
 		t.Fatalf("InboundDropped = %d", c.InboundDropped())
+	}
+}
+
+// wireWriter lets the test inspect the encoded params before decoding can
+// erase the distinction between absent params and JSON null.
+type wireWriter func([]byte) (int, error)
+
+func (w wireWriter) Write(b []byte) (int, error) { return w(b) }
+
+func TestLifecycleCallsDoNotEncodeNullParams(t *testing.T) {
+	reader, reply := io.Pipe()
+	requests := make(chan map[string]json.RawMessage, 3)
+	c := NewConn(reader, wireWriter(func(b []byte) (int, error) {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(b, &fields); err != nil {
+			return 0, err
+		}
+		requests <- fields
+		response := append([]byte(`{"jsonrpc":"2.0","id":`), fields["id"]...)
+		response = append(response, []byte(`,"result":{"ok":true}}`+"\n")...)
+		if _, err := reply.Write(response); err != nil {
+			return 0, err
+		}
+		return len(b), nil
+	}))
+	t.Cleanup(func() { _ = c.Close(); _ = reply.Close() })
+	client := NewClient(c)
+	if _, err := client.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Health(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Unload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		fields := <-requests
+		if params, exists := fields["params"]; exists && string(params) != "{}" {
+			t.Fatalf("lifecycle method %s sent params %s", fields["method"], params)
+		}
+	}
+}
+
+func TestDefaultInboundCapDropsOversizedFrameAndKeepsConnection(t *testing.T) {
+	p := newPeer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { _, err := p.conn.Call(ctx, "large", nil); result <- err }()
+	req := p.request()
+	p.reply(req.ID, `"`+strings.Repeat("x", 8<<20)+`"`)
+	// A valid following response must still correlate after the oversized line.
+	p.reply(req.ID, `true`)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	if p.conn.InboundDropped() != 1 {
+		t.Fatal("default inbound cap did not drop oversized frame")
+	}
+}
+
+func TestExactOutboundFrameBoundary(t *testing.T) {
+	for _, size := range []int{8 << 20, (8 << 20) + 1} {
+		var written bytes.Buffer
+		reader, writer := io.Pipe()
+		conn := NewConn(reader, &written)
+		base, _ := json.Marshal(subprocess.RPCRequest{JSONRPC: "2.0", Method: "boundary", Params: map[string]string{"blob": ""}})
+		err := conn.Notify("boundary", map[string]string{"blob": strings.Repeat("x", size-len(base)-1)})
+		if size == 8<<20 {
+			if err != nil || written.Len() != size {
+				t.Fatalf("exact cap: bytes=%d err=%v", written.Len(), err)
+			}
+		} else if !errors.Is(err, ErrFrameTooLarge) || written.Len() != 0 {
+			t.Fatalf("over cap: bytes=%d err=%v", written.Len(), err)
+		}
+		_ = conn.Close()
+		_ = writer.Close()
+	}
+}
+
+func TestExactInboundFrameBoundary(t *testing.T) {
+	p := newPeer(t)
+	for _, size := range []int{8 << 20, (8 << 20) + 1} {
+		call := callAsync(context.Background(), p.conn, "boundary")
+		request := p.request()
+		prefix := `{"jsonrpc":"2.0","id":` + itoa(request.ID) + `,"result":"`
+		suffix := `"}`
+		payload := strings.Repeat("x", size-len(prefix)-len(suffix)-1)
+		p.raw(prefix + payload + suffix)
+		if size == 8<<20 {
+			got := await(t, call)
+			if got.err != nil || len(got.raw) != len(payload)+2 {
+				t.Fatalf("exact cap: bytes=%d err=%v", len(got.raw), got.err)
+			}
+		} else {
+			p.reply(request.ID, `"after dropped frame"`)
+			got := await(t, call)
+			if got.err != nil || string(got.raw) != `"after dropped frame"` || p.conn.InboundDropped() != 1 {
+				t.Fatalf("over cap delivered: %v drops=%d", got.err, p.conn.InboundDropped())
+			}
+		}
 	}
 }

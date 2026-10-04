@@ -18,6 +18,7 @@ import (
 
 	pluginhost "github.com/hollis-labs/plugin-host"
 	"github.com/hollis-labs/plugin-host/pluginhosttest"
+	"github.com/hollis-labs/plugin-sdk/capability"
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
@@ -32,7 +33,7 @@ func fixtureSpec(t *testing.T, behavior string, extraEnv ...string) (pluginhost.
 		ID:               "fixture",
 		Command:          command,
 		Env:              env,
-		Init:             subprocess.InitParams{DataDir: dir, CacheDir: filepath.Join(dir, "cache")},
+		Init:             pluginhosttest.FixtureInit(dir, filepath.Join(dir, "cache")),
 		HandshakeTimeout: 10 * time.Second,
 		UnloadTimeout:    time.Second,
 		ReapTimeout:      2 * time.Second,
@@ -102,7 +103,7 @@ func eventually(t *testing.T, within time.Duration, what string, cond func() boo
 
 func TestStartRunsInitThenLoadAndReturnsWhatThePluginSaid(t *testing.T) {
 	p, _ := startFixture(t, pluginhosttest.BehaviourEcho)
-	if info := p.Info(); info.ID != "fixture" || info.Protocol != 1 {
+	if info := p.Info(); info.ID != "fixture" || info.Protocol != 2 || info.CapabilityContract != 1 {
 		t.Fatalf("Info = %+v", info)
 	}
 	if got := toolAs[[]string](t, p, "trace", nil); !slices.Equal(got, []string{"plugin/init", "plugin/load"}) {
@@ -119,14 +120,18 @@ func TestStartRunsInitThenLoadAndReturnsWhatThePluginSaid(t *testing.T) {
 func TestInitParamsDefaultsAreFilledOnlyWhereZero(t *testing.T) {
 	spec, dir := fixtureSpec(t, pluginhosttest.BehaviourEcho)
 	spec.Dir = dir
-	spec.Init = subprocess.InitParams{}
+	spec.Init.PluginDir = ""
+	spec.Init.Config = nil
+	spec.Init.HostInfo.Protocol = 0
+	spec.Init.CapabilityContract = 0
+	spec.Init.LogLevel = ""
 	p, err := pluginhost.Start(context.Background(), spec)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = p.Stop(context.Background()) })
 	got := toolAs[subprocess.InitParams](t, p, "init", nil)
-	if got.HostInfo.Protocol != 1 || got.LogLevel != "info" || got.PluginDir != dir || got.Config == nil {
+	if got.HostInfo.Protocol != subprocess.ProtocolVersion || got.LogLevel != "info" || got.PluginDir != dir || got.Config == nil {
 		t.Fatalf("defaults = %+v", got)
 	}
 	raw := tool(t, p, "init", nil)
@@ -139,9 +144,11 @@ func TestInitParamsHostOwnedFieldsArriveVerbatim(t *testing.T) {
 	spec, dir := fixtureSpec(t, pluginhosttest.BehaviourEcho)
 	spec.Init = subprocess.InitParams{
 		PluginDir: "/plugins/x", DataDir: dir, CacheDir: "/cache/x", LogLevel: "debug",
-		Config:   map[string]string{"token": "s3cret"},
-		Granted:  []string{"net.http", "fs.read"},
-		HostInfo: subprocess.HostInfo{Version: "9.9.9", Protocol: 1},
+		Config:             map[string]string{"token": "s3cret"},
+		Grants:             capability.GrantSet{testGrant()},
+		CapabilityContract: capability.ContractVersion,
+		Incarnation:        capability.RuntimeIdentity{HostInstance: "fixture-host", OwnerID: "fixture", OwnerGeneration: 1},
+		HostInfo:           subprocess.HostInfo{Version: "9.9.9", Protocol: subprocess.ProtocolVersion},
 	}
 	p, err := pluginhost.Start(context.Background(), spec)
 	if err != nil {
@@ -150,7 +157,7 @@ func TestInitParamsHostOwnedFieldsArriveVerbatim(t *testing.T) {
 	t.Cleanup(func() { _ = p.Stop(context.Background()) })
 	got := toolAs[subprocess.InitParams](t, p, "init", nil)
 	if got.PluginDir != "/plugins/x" || got.CacheDir != "/cache/x" || got.LogLevel != "debug" ||
-		got.Config["token"] != "s3cret" || !slices.Equal(got.Granted, []string{"net.http", "fs.read"}) ||
+		got.Config["token"] != "s3cret" || len(got.Grants) != 1 || got.Grants[0].GrantID != "fixture-grant" || string(got.Grants[0].Scope) != `{}` ||
 		got.HostInfo.Version != "9.9.9" {
 		t.Fatalf("init params = %+v", got)
 	}
@@ -315,10 +322,9 @@ func TestSpawnLeavesTheHandshakeToTheHost(t *testing.T) {
 	t.Cleanup(func() { _ = p.Stop(context.Background()) })
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	res, err := p.Client().Init(ctx, subprocess.InitParams{
-		Config:   map[string]string{"api_key": "resolved-by-the-host"},
-		HostInfo: subprocess.HostInfo{Version: "1", Protocol: 1},
-	})
+	params := spec.Init
+	params.Config = map[string]string{"api_key": "resolved-by-the-host"}
+	res, err := p.Client().Init(ctx, params)
 	if err != nil || res.ID != "fixture" {
 		t.Fatalf("Init = %+v, %v", res, err)
 	}
@@ -508,8 +514,8 @@ func TestUnknownMethodAndApplicationErrorCodesArePreserved(t *testing.T) {
 
 func TestBigResponsesAreDeliveredAndBigRequestsRefusedClientSide(t *testing.T) {
 	p, _ := startFixture(t, pluginhosttest.BehaviourEcho)
-	big := toolAs[map[string]string](t, p, "big", map[string]any{"bytes": 12 << 20})
-	if len(big["data"]) != 12<<20 {
+	big := toolAs[map[string]string](t, p, "big", map[string]any{"bytes": 7 << 20})
+	if len(big["data"]) != 7<<20 {
 		t.Fatalf("got %d bytes", len(big["data"]))
 	}
 	_, err := p.Client().MCPCallTool(context.Background(), subprocess.MCPCallRequest{
@@ -668,4 +674,8 @@ func TestLoadInfoRetainsAcknowledgmentWithoutRepeatingLoad(t *testing.T) {
 	if trace := toolAs[[]string](t, p, "trace", nil); !slices.Equal(trace, []string{"plugin/init", "plugin/load"}) {
 		t.Fatalf("handshake repeated: %v", trace)
 	}
+}
+
+func testGrant() capability.Grant {
+	return capability.Grant{GrantID: "fixture-grant", Name: "storage.read", SchemaVersion: 1, Scope: json.RawMessage(`{}`), HostInstance: "fixture-host", OwnerID: "fixture", OwnerGeneration: 1, Audience: "fixture", IssuedAt: "2026-01-01T00:00:00Z", ExpiresAt: "2027-01-01T00:00:00Z", PolicyRevision: "test"}
 }

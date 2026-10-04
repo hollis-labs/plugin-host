@@ -6,12 +6,18 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
 // SuperviseOptions configures a [Supervisor].
 type SuperviseOptions struct {
 	// Policy is the restart budget and backoff.
 	Policy RestartPolicy
+	// InitFactory supplies a fresh Init for each attempt, numbered from one.
+	// The host owns generation issuance and fresh grants. It must honor ctx;
+	// HandshakeTimeout bounds it and Stop cancels it. Without it, exits are terminal.
+	InitFactory func(context.Context, uint64) (subprocess.InitParams, error)
 	// ClassifyExit must return a typed TransientError to permit restarting.
 	// Nil means unexpected exits are terminal. Never infer transience from a timeout.
 	ClassifyExit func(ExitInfo) error
@@ -55,12 +61,16 @@ type Supervisor struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu           sync.Mutex
-	cur          *Process
-	restarts     int
-	started      bool
-	stopped      bool
-	healthKilled *Process
+	mu             sync.Mutex
+	cur            *Process
+	attempts       uint64
+	lastInit       subprocess.InitParams
+	reserved       *Owner
+	pendingFactory <-chan struct{}
+	restarts       int
+	started        bool
+	stopped        bool
+	healthKilled   *Process
 
 	stopOnce   sync.Once
 	stopping   chan struct{}
@@ -103,8 +113,13 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	hctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	defer context.AfterFunc(s.ctx, cancel)()
-	p, err := Start(hctx, s.spec)
+	spec, err := s.attemptSpec(hctx)
+	var p *Process
+	if err == nil {
+		p, err = Start(hctx, spec)
+	}
 	if err != nil {
+		s.releaseAttempt(nil)
 		s.mu.Lock()
 		s.started = false
 		stopped := s.stopped
@@ -117,7 +132,8 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	s.mu.Lock()
 	if s.stopped {
 		s.mu.Unlock()
-		_ = p.Stop(context.Background())
+		stopErr := p.Stop(context.Background())
+		s.releaseAttempt(stopErr)
 		s.finish()
 		return errors.New("pluginhost: supervisor is stopped")
 	}
@@ -170,10 +186,15 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 	p := s.cur
 	s.cur = nil
 	s.mu.Unlock()
-	if p == nil {
-		return nil
+	var stopErr error
+	if p != nil {
+		stopErr = p.Stop(ctx)
+		s.releaseAttempt(stopErr)
 	}
-	return p.Stop(ctx)
+	if s.PendingFactory() {
+		stopErr = errors.Join(stopErr, ErrInitFactoryPending)
+	}
+	return stopErr
 }
 
 func (s *Supervisor) isStopping() bool {
@@ -194,6 +215,7 @@ func (s *Supervisor) run(p *Process) {
 		if !s.watch(p) {
 			return
 		}
+		s.releaseAttempt(nil)
 		info, _ := p.ExitInfo()
 		s.mu.Lock()
 		info.SupervisorInitiatedKill = s.healthKilled == p
@@ -229,7 +251,14 @@ func (s *Supervisor) restart(crashed *Process, info ExitInfo) (*Process, bool) {
 		_, _, lastErr = isolated(ctx, func() (struct{}, error) { return struct{}{}, s.opts.ClassifyExit(info) })
 		cancel()
 	}
+	if info.SupervisorInitiatedKill {
+		lastErr = errors.Join(lastErr, ErrUnhealthy)
+	}
 	retryable := IsTransient(lastErr)
+	if s.opts.InitFactory == nil {
+		lastErr = errors.Join(lastErr, processFailure(s.spec, "init", ErrInitFactoryRequired))
+		retryable = false
+	}
 	for {
 		s.mu.Lock()
 		attempt := s.restarts
@@ -257,7 +286,11 @@ func (s *Supervisor) restart(crashed *Process, info ExitInfo) (*Process, bool) {
 		}
 
 		// s.ctx is canceled by Stop, which fails a handshake in flight fast.
-		next, err := Start(s.ctx, s.spec)
+		spec, err := s.attemptSpec(s.ctx)
+		var next *Process
+		if err == nil {
+			next, err = Start(s.ctx, spec)
+		}
 
 		s.mu.Lock()
 		if s.isStopping() {
@@ -265,13 +298,15 @@ func (s *Supervisor) restart(crashed *Process, info ExitInfo) (*Process, bool) {
 			if err == nil {
 				// Installing it now would spawn a child after the host
 				// decided to stop this plugin.
-				_ = next.Stop(context.Background())
+				stopErr := next.Stop(context.Background())
+				s.releaseAttempt(stopErr)
 			}
 			return nil, false
 		}
 		s.restarts++
 		if err != nil {
 			s.mu.Unlock()
+			s.releaseAttempt(nil)
 			lastErr = err
 			retryable = IsTransient(err)
 			continue
@@ -337,4 +372,91 @@ func (s *Supervisor) watch(p *Process) bool {
 			}
 		}
 	}
+}
+
+// ErrInitFactoryRequired reports a restart lacking host-issued Init authority.
+var ErrInitFactoryRequired = errors.New("pluginhost: supervised restart requires an Init factory")
+
+func (s *Supervisor) attemptSpec(ctx context.Context) (Spec, error) {
+	if s.PendingFactory() {
+		return s.spec, processFailure(s.spec, "init", ErrInitFactoryPending)
+	}
+	if s.attempts == ^uint64(0) {
+		return s.spec, initFailure(s.spec, &subprocess.InitError{Code: subprocess.InitInvalid, Field: "attempt"})
+	}
+	s.attempts++
+	attempt := s.attempts
+	spec := snapshotSpec(s.spec.normalized())
+	if s.opts.InitFactory != nil {
+		bounded, cancel := context.WithTimeout(ctx, spec.HandshakeTimeout)
+		params, done, err := isolated(bounded, func() (subprocess.InitParams, error) { return s.opts.InitFactory(bounded, attempt) })
+		cancel()
+		if done != nil {
+			s.mu.Lock()
+			s.pendingFactory = done
+			s.mu.Unlock()
+			err = &pendingCallbackError{Cause: errors.Join(err, ErrInitFactoryPending), Done: done}
+		}
+		if err != nil {
+			return spec, initFailure(spec, err)
+		}
+		spec.Init = params
+	} else if s.attempts > 1 {
+		return spec, processFailure(spec, "init", ErrInitFactoryRequired)
+	}
+	spec = snapshotSpec(spec.normalized())
+	if err := validateInit(spec); err != nil {
+		return spec, err
+	}
+	current, previous := spec.Init.Incarnation, s.lastInit.Incarnation
+	if previous.OwnerGeneration > 0 && (current.HostInstance != previous.HostInstance || current.OwnerID != previous.OwnerID || current.OwnerGeneration <= previous.OwnerGeneration) {
+		return spec, initFailure(spec, &subprocess.InitError{Code: subprocess.InitInvalid, Field: "incarnation"})
+	}
+	if s.opts.InitFactory != nil {
+		owner := Owner{HostInstance: current.HostInstance, OwnerID: current.OwnerID, OwnerGeneration: current.OwnerGeneration}
+		if err := reserveOwner(owner); err != nil {
+			return spec, processFailure(spec, "generation", err)
+		}
+		s.mu.Lock()
+		s.reserved = &owner
+		s.mu.Unlock()
+	}
+	s.lastInit = spec.Init
+	return spec, nil
+}
+
+// ErrInitFactoryPending reports host factory code still running after cancellation.
+var ErrInitFactoryPending = errors.New("pluginhost: Init factory is still running")
+
+// PendingFactory reports isolated host work that has not returned yet. Stop is
+// bounded and returns ErrInitFactoryPending while that work remains; hosts must
+// reconcile its external effects before discarding the supervisor.
+func (s *Supervisor) PendingFactory() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pendingFactory == nil {
+		return false
+	}
+	select {
+	case <-s.pendingFactory:
+		s.pendingFactory = nil
+		return false
+	default:
+		return true
+	}
+}
+
+func (s *Supervisor) releaseAttempt(cause error) {
+	s.mu.Lock()
+	owner := s.reserved
+	s.reserved = nil
+	s.mu.Unlock()
+	if owner == nil {
+		return
+	}
+	report := DisposalReport{Owner: *owner, Incomplete: cause != nil}
+	if cause != nil {
+		report.Failures = []CleanupFailure{{Step: "stop", Cause: cause}}
+	}
+	_ = recordOwnerDisposal([2]string{owner.HostInstance, owner.OwnerID}, report, nil)
 }

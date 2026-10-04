@@ -94,7 +94,7 @@ type requirement struct {
 
 var requirements = []requirement{
 	{"R01", "handshake sends init then load", (*env).r01},
-	{"R02", "init params: protocol 1, config {}, dirs verbatim", (*env).r02},
+	{"R02", "init params: protocol 2, explicit grants, config {}, dirs verbatim", (*env).r02},
 	{"R03", "protocol mismatch fails start and the child is gone", (*env).r03},
 	{"R04", "empty plugin id fails start", (*env).r04},
 	{"R05", "init and load errors fail start with the stderr tail, child reaped", (*env).r05},
@@ -104,7 +104,7 @@ var requirements = []requirement{
 	{"R09", "a crash fails calls as gone, promptly", (*env).r09},
 	{"R10", "garbage frames are dropped", (*env).r10},
 	{"R11", "the final frame before exit is delivered", (*env).r11},
-	{"R12", "12 MiB response delivered, 9 MiB request refused", (*env).r12},
+	{"R12", "7 MiB response delivered, oversized frames refused", (*env).r12},
 	{"R13", "graceful stop ends without SIGKILL", (*env).r13},
 	{"R14", "stop of a wedged plugin is bounded and kills it", (*env).r14},
 	{"R15", "stop kills the plugin's process group", (*env).r15},
@@ -358,16 +358,21 @@ func (e *env) r01() {
 func (e *env) r02() {
 	inst, c := e.start(BehaviourEcho)
 	var got struct {
-		Config   json.RawMessage `json:"config"`
-		DataDir  string          `json:"data_dir"`
-		CacheDir string          `json:"cache_dir"`
-		HostInfo struct {
+		Config             json.RawMessage `json:"config"`
+		DataDir            string          `json:"data_dir"`
+		CacheDir           string          `json:"cache_dir"`
+		Grants             json.RawMessage `json:"grants"`
+		CapabilityContract int             `json:"capability_contract"`
+		HostInfo           struct {
 			Protocol int `json:"protocol"`
 		} `json:"host_info"`
 	}
 	e.mustTool(inst, "init", nil, &got)
-	if got.HostInfo.Protocol != 1 {
-		e.t.Errorf("host_info.protocol = %d, want 1", got.HostInfo.Protocol)
+	if got.HostInfo.Protocol != 2 {
+		e.t.Errorf("host_info.protocol = %d, want 2", got.HostInfo.Protocol)
+	}
+	if got.CapabilityContract != 1 || strings.TrimSpace(string(got.Grants)) != "[]" {
+		e.t.Errorf("capability contract/grants = %d/%s", got.CapabilityContract, got.Grants)
 	}
 	if strings.TrimSpace(string(got.Config)) != "{}" {
 		e.t.Errorf("config = %s, want {} (never null)", got.Config)
@@ -544,11 +549,17 @@ func (e *env) r11() {
 
 func (e *env) r12() {
 	inst, _ := e.start(BehaviourEcho)
-	const size = 12 << 20
+	const size = 7 << 20
 	var big struct{ Data string }
 	e.mustTool(inst, "big", map[string]any{"bytes": size}, &big)
 	if len(big.Data) != size {
 		e.t.Fatalf("got %d bytes of a %d byte response", len(big.Data), size)
+	}
+	overCtx, overCancel := context.WithTimeout(context.Background(), time.Second)
+	_, overErr := e.callTool(overCtx, inst, "big", map[string]any{"bytes": 9 << 20})
+	overCancel()
+	if overErr == nil {
+		e.t.Fatal("default inbound cap accepted a 9 MiB response")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

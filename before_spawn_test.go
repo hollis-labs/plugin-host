@@ -37,7 +37,7 @@ func TestBeforeSpawnRunsOnSupervisedRestarts(t *testing.T) {
 		return nil
 	}
 	events := newEvents()
-	supervisor := pluginhost.Supervise(spec, events.options(fastPolicy(2)))
+	supervisor := pluginhost.Supervise(spec, freshInitOptions(spec, events.options(fastPolicy(2))))
 	if err := supervisor.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}

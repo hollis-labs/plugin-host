@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hollis-labs/plugin-sdk/capability"
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
@@ -17,13 +18,14 @@ const (
 )
 
 // Spec is what the host needs to spawn one plugin. The library passes Env,
-// Init.Config and Init.Granted through untouched: what a plugin may see,
+// Init.Config and Init.Grants through untouched: what a plugin may see,
 // hold or be granted is the host's decision, not this library's.
 type Spec struct {
 	// ID names the plugin in errors before the child has introduced itself.
 	ID string
-	// ExpectedID and ExpectedVersion, when set, are checked after init and
-	// before load. ID itself remains the pre-handshake diagnostic label.
+	// ExpectedID defaults to Init.Incarnation.OwnerID and must equal that nonblank ID.
+	// It and ExpectedVersion, when set, are checked after init and before load.
+	// ID itself remains the pre-handshake diagnostic label.
 	ExpectedID      string
 	ExpectedVersion string
 	// Command is the executable; Args its arguments; Dir its working
@@ -45,9 +47,10 @@ type Spec struct {
 	// Use [InheritEnv] to opt in. (On unix, Go adds PWD when Dir is set.)
 	Env []string
 
-	// Init is the plugin/init payload, owned by the host verbatim: Config,
-	// Granted, HostInfo.Version and the directories. The library fills only
-	// what is zero: HostInfo.Protocol = 1, Config = {} (never null),
+	// Init is the plugin/init payload. Lifecycle overwrites Incarnation with its issued tuple.
+	// Standalone callers supply Incarnation. The host owns Config,
+	// Grants, HostInfo.Version and the directories. The library fills only
+	// what is zero: HostInfo.Protocol = 2, CapabilityContract = 1, Config = {} (never null),
 	// LogLevel = "info", PluginDir = Dir.
 	Init subprocess.InitParams
 
@@ -99,6 +102,9 @@ func (s Spec) normalized() Spec {
 	if s.Init.HostInfo.Protocol == 0 {
 		s.Init.HostInfo.Protocol = subprocess.ProtocolVersion
 	}
+	if s.Init.CapabilityContract == 0 {
+		s.Init.CapabilityContract = capability.ContractVersion
+	}
 	if s.Init.Config == nil {
 		s.Init.Config = map[string]string{}
 	}
@@ -107,6 +113,9 @@ func (s Spec) normalized() Spec {
 	}
 	if s.Init.PluginDir == "" {
 		s.Init.PluginDir = s.Dir
+	}
+	if s.ExpectedID == "" {
+		s.ExpectedID = s.Init.Incarnation.OwnerID
 	}
 	return s
 }

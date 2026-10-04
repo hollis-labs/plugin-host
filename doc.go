@@ -1,6 +1,6 @@
 // Package pluginhost is the host side of plugin-sdk's stdio JSON-RPC
 // protocol: it spawns a plugin process, performs the handshake, correlates
-// calls by id, watches health, restarts a crashed plugin, and stops it within
+// calls by id, watches health, restarts classified transient exits, and stops it within
 // bounded time. plugin-sdk ships the plugin half (subprocess.Serve) and the
 // wire types; this package is the half that was hand-written five times.
 //
@@ -9,8 +9,9 @@
 // [Conn] is framing and id correlation over any reader and writer pair.
 // [Client] is a thin typed layer over it, one method per protocol method,
 // passing plugin-sdk's structs through. [Process] owns one OS child: [Spawn]
-// starts it without a handshake, [Start] adds [Process.Handshake], and
-// [Process.Stop] ends it. [Supervise] keeps a plugin running across crashes;
+// validates Init and starts it without a handshake, [Start] adds [Process.Handshake], and
+// [Process.Stop] ends it. [Supervise] requires an InitFactory to issue fresh
+// authority for explicitly transient restarts;
 // [HealthGate] is an on-demand cached health verdict for hosts that would
 // rather not probe in the background. [Tail] and [Redact] bound and scrub a
 // plugin's stderr.
@@ -21,11 +22,16 @@
 // # What the host still decides
 //
 // Trust, capability grants, secrets, manifests and where plugins come from
-// are not here. [Spec] passes Env, Init.Config and Init.Granted through
+// are not here. [Spec] passes Env, Init.Config and Init.Grants through
 // untouched. Spec.BeforeSpawn carries a host validation hook through every
 // spawn and supervised restart; a refusal leaves no child. A host that keeps secrets in the environment (and sends an
 // empty Config) and a host that resolves them into Config (and keeps the
 // environment bare) are both expressible; the library chooses neither.
+//
+// Init uses the SDK's protocol-2 DTO and capability contract 1. Structural
+// validation precedes spawn; acknowledgement and identity/version verification
+// precede load. ExpectedID must match incarnation.owner_id. Reverse and hooks
+// profile offers are refused before spawn.
 //
 // # Contracts worth knowing
 //

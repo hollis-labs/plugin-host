@@ -8,6 +8,9 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/hollis-labs/plugin-sdk/capability"
+	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
 // Plan is a host-normalized candidate. The callbacks must treat its slices,
@@ -216,7 +219,7 @@ func (l *Lifecycle) IsCurrent(o Owner) bool {
 func (l *Lifecycle) failure(stage Stage, step string, g uint64, err error) *Failure {
 	code := step + "_failed"
 	var f *Failure
-	if stage == StageLoad && step == "handshake" && errors.As(err, &f) {
+	if stage == StageLoad && (step == "handshake" || step == "spawn") && errors.As(err, &f) {
 		code = f.Code
 		step = f.Step
 		stage = f.Stage
@@ -540,6 +543,8 @@ func (l *Lifecycle) load(ctx context.Context, rev uint64, p Plan) *Failure {
 		return l.failure(StageLoad, "generation", g, err)
 	}
 	o := Owner{HostInstance: l.opts.HostInstance, OwnerID: l.id, OwnerGeneration: g}
+	runtime := capability.RuntimeIdentity{HostInstance: o.HostInstance, OwnerID: o.OwnerID, OwnerGeneration: o.OwnerGeneration}
+	p.Spec.Init.Incarnation = runtime
 	// The generation lifetime is independent of the caller's start context.
 	life, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel retained in incarnation, called by dispose
 	i := &incarnation{owner: o, epoch: rev, cancel: cancel}
@@ -573,6 +578,9 @@ func (l *Lifecycle) load(ctx context.Context, rev uint64, p Plan) *Failure {
 		if err != nil {
 			return fail("prepare", err)
 		}
+	}
+	if p.Spec.Init.Incarnation != runtime {
+		return fail("init", &subprocess.InitError{Code: subprocess.InitInvalid, Field: "incarnation"})
 	}
 	p.Spec.ID = l.id
 	if p.Spec.ExpectedID == "" {
@@ -760,7 +768,21 @@ func snapshotSpec(s Spec) Spec {
 	s.Secrets = slices.Clone(s.Secrets)
 	s.ConnOptions = slices.Clone(s.ConnOptions)
 	s.Init.Config = maps.Clone(s.Init.Config)
-	s.Init.Granted = slices.Clone(s.Init.Granted)
+	s.Init.Grants = slices.Clone(s.Init.Grants)
+	for i := range s.Init.Grants {
+		s.Init.Grants[i].Scope = slices.Clone(s.Init.Grants[i].Scope)
+	}
+	s.Init.Identity = slices.Clone(s.Init.Identity)
+	if s.Init.HostServices != nil {
+		h := *s.Init.HostServices
+		h.Methods = slices.Clone(h.Methods)
+		h.Limits.MethodTimeoutMS = maps.Clone(h.Limits.MethodTimeoutMS)
+		s.Init.HostServices = &h
+	}
+	if s.Init.HooksProfile != nil {
+		h := *s.Init.HooksProfile
+		s.Init.HooksProfile = &h
+	}
 	return s
 }
 func snapshotPlan(p Plan) Plan {

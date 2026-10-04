@@ -253,7 +253,7 @@ func TestProcessFailureDiagnosticsPreserveCausesAndRedact(t *testing.T) {
 	}
 	bad, _ := fixtureSpec(t, pluginhosttest.BehaviourBadProtocol)
 	_, err = pluginhost.Start(context.Background(), bad)
-	if !errors.Is(err, pluginhost.ErrProtocolMismatch) || !strings.Contains(err.Error(), "speaks 2") {
+	if !errors.Is(err, pluginhost.ErrProtocolMismatch) || !strings.Contains(err.Error(), "speaks 1") {
 		t.Fatal("protocol diagnostic lost", err)
 	}
 }
@@ -296,7 +296,7 @@ func TestSupervisorPermanentReplacementFailureIsNotRetried(t *testing.T) {
 		return nil
 	}
 	ev := newEvents()
-	sup := pluginhost.Supervise(spec, ev.options(fastPolicy(3)))
+	sup := pluginhost.Supervise(spec, freshInitOptions(spec, ev.options(fastPolicy(3))))
 	if err := sup.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}

@@ -7,11 +7,13 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/hollis-labs/plugin-sdk/capability"
 )
 
 // MaxOwnerGeneration is the largest integer represented exactly by Go/JS
 // authority DTOs. Exhaustion fails closed; never wrap or reuse a generation.
-const MaxOwnerGeneration uint64 = 9007199254740991
+const MaxOwnerGeneration uint64 = capability.MaxSafeInteger
 
 // MaxLifecycleRevision bounds persisted snapshot ordering; exhaustion fails closed.
 const MaxLifecycleRevision uint64 = MaxOwnerGeneration
@@ -223,26 +225,34 @@ func (l *Lifecycle) restore(r LifecycleRecord) error {
 	return nil
 }
 func (l *Lifecycle) reserve(g uint64) error {
+	return reserveOwner(Owner{HostInstance: l.opts.HostInstance, OwnerID: l.id, OwnerGeneration: g})
+}
+
+func reserveOwner(owner Owner) error {
 	processLedger.Lock()
 	defer processLedger.Unlock()
-	a := ledgerRecord(l.key())
+	a := ledgerRecord([2]string{owner.HostInstance, owner.OwnerID})
 	if a.record.Revision >= MaxLifecycleRevision-4 {
 		return ErrInvalidLifecycleRecord
 	}
-	if g == 0 || g > MaxOwnerGeneration || g <= a.record.LastGeneration {
+	if owner.OwnerGeneration == 0 || owner.OwnerGeneration > MaxOwnerGeneration || owner.OwnerGeneration <= a.record.LastGeneration {
 		return ErrInvalidGeneration
 	}
-	a.record.HostInstance = l.opts.HostInstance
-	a.record.LastGeneration = g
-	a.record.Active = &Owner{HostInstance: l.opts.HostInstance, OwnerID: l.id, OwnerGeneration: g}
+	a.record.HostInstance = owner.HostInstance
+	a.record.LastGeneration = owner.OwnerGeneration
+	a.record.Active = &owner
 	a.record.Revision++
 	return nil
 }
 func (l *Lifecycle) recordDisposal(r DisposalReport, pending []<-chan struct{}) DisposalReport {
+	return recordOwnerDisposal(l.key(), r, pending)
+}
+
+func recordOwnerDisposal(key [2]string, r DisposalReport, pending []<-chan struct{}) DisposalReport {
 	processLedger.Lock()
 	defer processLedger.Unlock()
-	a := ledgerRecord(l.key())
-	a.record.HostInstance = l.opts.HostInstance
+	a := ledgerRecord(key)
+	a.record.HostInstance = key[0]
 	if a.record.Revision < MaxLifecycleRevision {
 		a.record.Revision++
 	} else {
@@ -250,7 +260,7 @@ func (l *Lifecycle) recordDisposal(r DisposalReport, pending []<-chan struct{}) 
 		r.Failures = append(r.Failures, CleanupFailure{Step: "revision", Cause: ErrInvalidLifecycleRecord})
 	}
 	if r.ID == "" {
-		r.ID = fmt.Sprintf("%s#%d/%d", l.opts.HostInstance, a.record.Revision, len(a.record.Disposals))
+		r.ID = fmt.Sprintf("%s#%d/%d", key[0], a.record.Revision, len(a.record.Disposals))
 	}
 	found := false
 	for i := range a.record.Disposals {

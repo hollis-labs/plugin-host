@@ -14,7 +14,6 @@ import (
 	"time"
 
 	pluginhost "github.com/hollis-labs/plugin-host"
-	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
 // LifecycleDriver is the separate lifecycle contract; process-only hosts can
@@ -121,7 +120,7 @@ func (e *lifecycleEnv) plan(behavior string) pluginhost.Plan {
 	e.t.Helper()
 	dir := e.t.TempDir()
 	command, env := FixtureCommand(behavior, dir)
-	return pluginhost.Plan{Spec: pluginhost.Spec{ID: "fixture", ExpectedVersion: "1.0.0", Command: command, Env: env, Init: subprocess.InitParams{DataDir: dir}, HandshakeTimeout: 300 * time.Millisecond, UnloadTimeout: 100 * time.Millisecond, ReapTimeout: time.Second}}
+	return pluginhost.Plan{Spec: pluginhost.Spec{ID: "fixture", ExpectedVersion: "1.0.0", Command: command, Env: env, Init: FixtureInit(dir, dir), HandshakeTimeout: 300 * time.Millisecond, UnloadTimeout: 100 * time.Millisecond, ReapTimeout: time.Second}}
 }
 func (e *lifecycleEnv) options(p pluginhost.Plan) pluginhost.LifecycleOptions {
 	epoch, err := pluginhost.NewHostInstance()
