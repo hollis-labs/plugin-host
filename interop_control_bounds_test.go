@@ -234,3 +234,115 @@ func TestInteropExpandedTrafficRequiresCommandedHelper(t *testing.T) {
 		})
 	}
 }
+
+func TestInteropNotificationsRequireAuthoredDirectionalCancellation(t *testing.T) {
+	frame := func(direction, kind, method string, id int, params any, code string) map[string]json.RawMessage {
+		body := map[string]any{"jsonrpc": "2.0", "params": params}
+		if kind != "notification" {
+			body["id"] = id
+		}
+		if method != "" {
+			body["method"] = method
+		}
+		if code != "" {
+			body["error"] = map[string]any{"data": map[string]any{"code": code}}
+		}
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		witness, err := json.Marshal(map[string]any{"kind": "wire", "direction": direction, "frame_type": kind, "method": method, "id": id, "raw": string(raw)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var event map[string]json.RawMessage
+		if err := json.Unmarshal(witness, &event); err != nil {
+			t.Fatal(err)
+		}
+		return event
+	}
+	for _, scenario := range []string{"parent-cancel", "reordered", "opposite-direction-same-id", "deadline", "unadvertised", "wrong-owner", "missing-target", "wrong-parent", "missing-parent-cancel", "duplicate", "unexpected-reason", "unproven-deadline", "malformed-envelope", "extra-params", "duplicate-field"} {
+		t.Run(scenario, func(t *testing.T) {
+			c := &interopControls{events: make(chan map[string]json.RawMessage, 16), failure: make(chan error, 1)}
+			parent, child, childParent, owner, reason := 31, 7, 31, "plugin", "parent_cancelled" //nolint:misspell // Preserve exact SDK wire spelling.
+			valid := scenario == "parent-cancel" || scenario == "reordered" || scenario == "opposite-direction-same-id" || scenario == "deadline"
+			if scenario == "opposite-direction-same-id" {
+				parent = 7
+				childParent = 7
+			}
+			if scenario == "wrong-parent" {
+				childParent = 32
+			}
+			if scenario == "wrong-owner" {
+				owner = "host"
+			}
+			if scenario == "unexpected-reason" {
+				reason = "caller_cancelled" //nolint:misspell // Preserve exact SDK wire spelling.
+			}
+			if scenario == "deadline" || scenario == "unproven-deadline" {
+				reason = "deadline_exceeded"
+			}
+			terminalCode := ""
+			if scenario == "deadline" {
+				terminalCode = "deadline_exceeded"
+			}
+			events := []map[string]json.RawMessage{
+				frame("host-to-worker", "request", "command/execute", parent, nil, ""), frame("worker-to-host", "response", "", parent, nil, ""),
+				frame("worker-to-host", "request", "host/storage/get", child, map[string]any{"context": map[string]any{"parent_call": map[string]any{"request_owner": "host", "id": childParent}}}, ""), frame("host-to-worker", "response", "", child, nil, terminalCode),
+			}
+			notifications := []map[string]json.RawMessage{}
+			if scenario != "missing-parent-cancel" && scenario != "deadline" && scenario != "unproven-deadline" {
+				notifications = append(notifications, frame("host-to-worker", "notification", "rpc/cancel", 0, map[string]any{"request_owner": "host", "id": parent, "reason": "caller_cancelled"}, "")) //nolint:misspell // Preserve exact SDK wire spelling.
+			}
+			if scenario == "missing-target" {
+				child = 999
+			}
+			method := "rpc/cancel"
+			if scenario == "unadvertised" {
+				method = "host/unadvertised"
+			}
+			notify := frame("worker-to-host", "notification", method, 0, map[string]any{"request_owner": owner, "id": child, "reason": reason}, "")
+			if scenario == "malformed-envelope" || scenario == "extra-params" || scenario == "duplicate-field" {
+				raw := rawEventString(notify, "raw")
+				if scenario == "duplicate-field" {
+					raw = strings.Replace(raw, `"jsonrpc":"2.0"`, `"jsonrpc":"2.0","jsonrpc":"2.0"`, 1)
+				} else {
+					var body map[string]any
+					if err := json.Unmarshal([]byte(raw), &body); err != nil {
+						t.Fatal(err)
+					}
+					if scenario == "malformed-envelope" {
+						body["id"] = nil
+					} else {
+						body["params"].(map[string]any)["extra"] = true
+					}
+					changed, err := json.Marshal(body)
+					if err != nil {
+						t.Fatal(err)
+					}
+					raw = string(changed)
+				}
+				notify["raw"], _ = json.Marshal(raw)
+			}
+			notifications = append(notifications, notify)
+			if scenario == "duplicate" {
+				notifications = append(notifications, notify)
+			}
+			if scenario == "reordered" {
+				events = append(notifications, events...)
+			} else {
+				events = append(events, notifications...)
+			}
+			events = append(events, map[string]json.RawMessage{"kind": json.RawMessage(`"finished"`)}, map[string]json.RawMessage{"kind": json.RawMessage(`"worker_exit"`), "exit_code": json.RawMessage(`0`)})
+			for _, event := range events {
+				if err := c.enqueue(event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c.failure <- io.EOF
+			if err := c.finish(0); (err == nil) != valid {
+				t.Fatalf("authored notification valid=%v: %v", valid, err)
+			}
+		})
+	}
+}

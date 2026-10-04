@@ -11,6 +11,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/hollis-labs/plugin-host/internal/strictjson"
 )
 
 // The observer forwards every worker stdout byte unchanged. It records bounded
@@ -123,7 +125,7 @@ func interopWireTerminals(events []map[string]json.RawMessage, expectedExit int)
 			return fmt.Errorf("harness unmatched wire terminal %s: requests=%d terminals=%d", key, entry.requests, entry.terminals)
 		}
 	}
-	return nil
+	return interopWireNotifications(events)
 }
 
 // Expanded fixture helpers originate only in actual get/put commands, not in
@@ -213,6 +215,115 @@ func interopExpandedHelpers(events []map[string]json.RawMessage, reverseLimit ui
 	for parent, want := range expected {
 		if want.remaining != 0 {
 			return fmt.Errorf("harness missing expanded helpers parent=%d remaining=%d", parent, want.remaining)
+		}
+	}
+	return nil
+}
+
+// Cancellation is the only authored notification in this implemented subset.
+// Account for it against real directional requests and terminal/parent evidence
+// after EOF, preserving observer reorder and opposite-direction ID collisions.
+func interopWireNotifications(events []map[string]json.RawMessage) error {
+	type request struct {
+		parent      uint64
+		parentOwner string
+	}
+	type cancellation struct {
+		direction, owner, reason string
+		id                       uint64
+	}
+	requests := map[string]request{}
+	terminalCodes := map[string]string{}
+	cancels := map[string]cancellation{}
+	for _, event := range events {
+		if rawEventString(event, "kind") != "wire" {
+			continue
+		}
+		direction, kind := rawEventString(event, "direction"), rawEventString(event, "frame_type")
+		var frame struct {
+			ID     uint64 `json:"id"`
+			Method string `json:"method"`
+			Params struct {
+				ID      uint64 `json:"id"`
+				Owner   string `json:"request_owner"`
+				Reason  string `json:"reason"`
+				Context struct {
+					Parent struct {
+						ID    uint64 `json:"id"`
+						Owner string `json:"request_owner"`
+					} `json:"parent_call"`
+				} `json:"context"`
+			} `json:"params"`
+			Error struct {
+				Data struct {
+					Code string `json:"code"`
+				} `json:"data"`
+			} `json:"error"`
+		}
+		// Large ordinary frames can have hash-only witnesses. Only cancellation
+		// and its small correlation/effect metadata require a raw witness here.
+		raw := rawEventString(event, "raw")
+		if raw != "" {
+			if err := json.Unmarshal([]byte(raw), &frame); err != nil {
+				return err
+			}
+		}
+		var id uint64
+		_ = json.Unmarshal(event["id"], &id)
+		switch kind {
+		case "request":
+			requests[fmt.Sprintf("%s/%d", direction, id)] = request{parent: frame.Params.Context.Parent.ID, parentOwner: frame.Params.Context.Parent.Owner}
+		case "response":
+			requestDirection := "host-to-worker"
+			if direction == "host-to-worker" {
+				requestDirection = "worker-to-host"
+			}
+			terminalCodes[fmt.Sprintf("%s/%d", requestDirection, id)] = frame.Error.Data.Code
+		case "notification":
+			envelope, err := strictjson.Object([]byte(raw), "jsonrpc", "method", "params")
+			if err != nil || string(envelope["jsonrpc"]) != `"2.0"` {
+				return errors.New("harness invalid cancellation envelope")
+			}
+			if _, err := strictjson.Object(envelope["params"], "request_owner", "id", "reason"); err != nil {
+				return err
+			}
+			owner := "host"
+			if direction == "worker-to-host" {
+				owner = "plugin"
+			}
+			if raw == "" || frame.Method != "rpc/cancel" || frame.ID != 0 || frame.Params.ID == 0 || frame.Params.Owner != owner {
+				return errors.New("harness unexpected wire notification")
+			}
+			key := fmt.Sprintf("%s/%d", direction, frame.Params.ID)
+			if _, duplicate := cancels[key]; duplicate {
+				return errors.New("harness duplicate cancellation notification")
+			}
+			cancels[key] = cancellation{direction: direction, owner: owner, reason: frame.Params.Reason, id: frame.Params.ID}
+		}
+	}
+	for key, cancel := range cancels {
+		published, ok := requests[key]
+		if !ok {
+			return errors.New("harness cancellation has no directional published request")
+		}
+		if cancel.owner == "host" {
+			if cancel.reason != "caller_cancelled" { //nolint:misspell // Preserve exact SDK wire spelling.
+				return errors.New("harness unexpected host cancellation reason")
+			}
+			continue
+		}
+		switch cancel.reason {
+		case "parent_cancelled": //nolint:misspell // Preserve exact SDK wire spelling.
+			parent, canceled := cancels[fmt.Sprintf("host-to-worker/%d", published.parent)]
+			if published.parentOwner != "host" || !canceled || parent.reason != "caller_cancelled" { //nolint:misspell // Preserve exact SDK wire spelling.
+				return errors.New("harness descendant cancellation has no actual parent cancellation")
+			}
+		case "deadline_exceeded":
+			if terminalCodes[key] != "deadline_exceeded" {
+				return errors.New("harness deadline cancellation lacks physical deadline terminal")
+			}
+		default:
+			return errors.New("harness unexpected plugin cancellation reason")
 		}
 	}
 	return nil
