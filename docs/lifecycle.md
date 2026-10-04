@@ -260,10 +260,12 @@ synthetic persistence cases cannot certify these durable guarantees.
 
 
 The base frame default is 8 MiB including LF both ways. Host service and hooks
-offers are refused before spawn. Lifecycle calls omit params or encode {}.
+offers are refused before spawn. Lifecycle calls with deadlines encode {"context":{"timeout_ms":N}}; otherwise params are absent or empty, never null.
 Process conformance R12 checks a 7 MiB response, rejects a 9 MiB response
-and request, and verifies the connection remains usable. Tagged RPC identifiers
-and duplex transport belong to a later SDK adoption.
+and request, and verifies the connection remains usable. Tagged RPC identifiers are adopted: positive safe outbound IDs and distinct
+numeric/string reply IDs. Duplex transport and optional profile activation
+remain deferred to the later slices. Raw Conn.Call for plugin/init bypasses the
+typed Init/handshake profile refusal; hosts should use the typed entry points.
 
 Supervisor factory tuples reserve into the same process-wide generation ledger
 as Lifecycle. A completed attempt clears its active checkpoint but retains the

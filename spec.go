@@ -12,7 +12,7 @@ import (
 
 const (
 	defaultHandshakeTimeout = 10 * time.Second
-	defaultUnloadTimeout    = 2 * time.Second
+	defaultUnloadTimeout    = subprocess.DefaultShutdownTimeout + time.Second
 	defaultReapTimeout      = 2 * time.Second
 	defaultStderrBytes      = 4096
 )
@@ -44,7 +44,8 @@ type Spec struct {
 	// Env is the child's EXACT environment. Nil means empty: the library
 	// never inherits the host's environment implicitly, because an implicit
 	// inherit hands every plugin whatever secrets the host happens to hold.
-	// Use [InheritEnv] to opt in. (On unix, Go adds PWD when Dir is set.)
+	// Use [InheritEnv] to opt in. With an explicit Env, Go does not add PWD;
+	// hosts that want PWD must include it in Env themselves.
 	Env []string
 
 	// Init is the plugin/init payload. Lifecycle overwrites Incarnation with its issued tuple.
@@ -57,7 +58,7 @@ type Spec struct {
 	// HandshakeTimeout bounds [Process.Handshake] even when the caller's
 	// context has no deadline (default 10s). UnloadTimeout is the graceful
 	// budget of [Process.Stop]: the plugin/unload call and the wait for exit
-	// after stdin closes share it (default 2s). ReapTimeout bounds the wait
+	// after the terminal reply share it (default 6s, including SDK drain margin). ReapTimeout bounds the wait
 	// after SIGKILL, and is the exec.Cmd WaitDelay (default 2s).
 	HandshakeTimeout time.Duration
 	UnloadTimeout    time.Duration

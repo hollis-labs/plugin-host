@@ -631,7 +631,7 @@ func TestNoGoroutinesLeakAcrossStartAndStop(t *testing.T) {
 
 func TestDefaultBudgets(t *testing.T) {
 	if testing.Short() {
-		t.Skip("uses the real default budgets (10s handshake, 2s+2s stop)")
+		t.Skip("uses the real default budgets (10s handshake, 6s+2s stop)")
 	}
 	spec, dir := fixtureSpec(t, pluginhosttest.BehaviourHangOnInit)
 	spec.HandshakeTimeout, spec.UnloadTimeout, spec.ReapTimeout = 0, 0, 0
@@ -656,8 +656,8 @@ func TestDefaultBudgets(t *testing.T) {
 	if err := p.Stop(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if took := time.Since(start); took < 1500*time.Millisecond || took > 5*time.Second {
-		t.Fatalf("wedge Stop with defaults took %s, want ~2s (unload budget) plus a kill", took)
+	if took := time.Since(start); took < 5500*time.Millisecond || took > 9*time.Second {
+		t.Fatalf("wedge Stop with defaults took %s, want ~6s (unload budget) plus a kill", took)
 	}
 }
 
@@ -678,4 +678,36 @@ func TestLoadInfoRetainsAcknowledgmentWithoutRepeatingLoad(t *testing.T) {
 
 func testGrant() capability.Grant {
 	return capability.Grant{GrantID: "fixture-grant", Name: "storage.read", SchemaVersion: 1, Scope: json.RawMessage(`{}`), HostInstance: "fixture-host", OwnerID: "fixture", OwnerGeneration: 1, Audience: "fixture", IssuedAt: "2026-01-01T00:00:00Z", ExpiresAt: "2027-01-01T00:00:00Z", PolicyRevision: "test"}
+}
+
+func TestUnloadReplyIsTerminalAndCleanupRunsOnce(t *testing.T) {
+	p, dir := startFixture(t, pluginhosttest.BehaviourEcho)
+	if err := p.Client().Unload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.Exited():
+	case <-time.After(3 * time.Second):
+		t.Fatal("SDK did not exit after terminal unload reply")
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "cleanup-trace")) //nolint:gosec // fixed record under the spawning test's private directory
+	if err != nil {
+		t.Fatal(err)
+	}
+	var trace []string
+	if err := json.Unmarshal(raw, &trace); err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, method := range trace {
+		if method == subprocess.MethodUnload {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("cleanup attempts: %d; trace=%v", count, trace)
+	}
+	if err := p.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 }

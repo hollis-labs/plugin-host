@@ -11,6 +11,9 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Fixed
 
+- Supervisor retains the first health-kill cause and stops health polling after
+  killing a child; a buffered probe cannot replace a timeout with ErrGone.
+
 - Truncated stderr tails discard their possibly partial leading line only when
   non-blank text remains after the first LF, before secret and host redaction.
   Re-apply this rule after a final byte trim if secret redaction grows the text.
@@ -25,6 +28,12 @@ refuses a tag whose CHANGELOG has no heading for it.
 - `MismatchError` carries bounded printable expected/actual identity and version
   metadata while retaining mismatch sentinels. Lifecycle failures preserve the
   nested redacted mismatch diagnostic and typed cause.
+- `WithForwardBinding` carries an invocation's host-issued binding reference.
+- Positive safe outbound IDs fail with `ErrRequestIDExhausted` instead of wrapping.
+- Forward calls transmit remaining budgets and send host-owned cancellation controls.
+- `ErrHealthInconclusive`, `HealthInconclusiveError`, and
+  `HealthVerdict.Inconclusive` expose health replies without a verdict.
+- `Conn.CancelDropped` counts cancellation controls not published completely.
 
 
 - `Supervisor.PendingFactory` and `ErrInitFactoryPending` expose host factory
@@ -43,12 +52,36 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ### Changed
 
+- Pin the SDK's bounded admission/cancellation runtime. Tagged RPC IDs preserve
+  string and numeric identity; only an absent ID denotes a notification.
+- Unload is terminal and invokes cleanup once; default graceful stop allows six
+  seconds for the SDK's five-second shutdown budget plus margin. Failed-start
+  pre-Init unload refusal does not mark teardown incomplete.
+- Health maps authored internal failures to unhealthy, malformed/protocol failures
+  to protocol mismatch, and only SDK rate-limit/deadline replies to typed
+  inconclusive probes. Silent local health timeouts count as unhealthy;
+  host-cancelled probes leave the cached verdict unchanged. Inconclusive probes
+  are retried by HealthGate and never trigger health kills. The SDK shares 16 execution slots; excess calls receive rate_limited.
+- Deadline responses preserve their typed RPC cause/effect state and also match
+  context.DeadlineExceeded, including unknown outcomes at the local deadline
+  (3 ms tolerance for wire rounding and timer skew). Caller cancellation controls
+  are best effort, bounded to 100 ms, and counted when dropped. Zero-byte drops
+  leave the connection up; partial control writes retire it. Writers without
+  SetWriteDeadline receive no cancel controls. Terminal unload sends
+  no cancellation control. Notifications acquire no implicit forward deadline.
+- Payload encoding precedes writer acquisition; remaining timeout is updated at
+  publication in a ten-byte space-padded timeout slot without re-encoding opaque
+  payloads under the writer. Typed-nil forward params are rejected locally.
+- Optional hooks and reverse offers remain refused; duplex activation is deferred.
+  Raw Conn.Call for plugin/init bypasses the typed entry-point refusal.
+
+
 - Supervisor factory tuples share Lifecycle's generation ledger across controller
   recreation; completed disposal releases the active checkpoint without reusing
   a generation. Explicit ExpectedID must match incarnation.owner_id.
 - Pin protocol 2 to the SDK pseudo-version until a tagged plugin-sdk release carries protocol 2.
 - Default frames are 8 MiB including LF in both directions; profile offers
-  are refused until host services and hooks are implemented. Lifecycle methods omit params or send {}.
+  are refused until host services and hooks are implemented. Lifecycle methods with deadlines send a context object with remaining timeout_ms; otherwise params are absent or empty, never null.
 
 - Cooperative cancellation receives a bounded grace before pending quarantine;
   reload preflight timeouts preserve the serving generation and failure status.

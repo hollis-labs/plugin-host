@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/hollis-labs/plugin-sdk/capability"
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
@@ -46,18 +48,19 @@ type Conn struct {
 	maxFrame       int
 	maxInbound     int
 	droppedInbound atomic.Int64
+	droppedCancel  atomic.Int64
 
 	nextID atomic.Int64
 
 	mu      sync.Mutex
-	pending map[int64]chan subprocess.RPCResponse
+	pending map[subprocess.RPCID]chan subprocess.RPCResponse
 	// closedBy is the error every pending and future call receives once the
 	// reader has ended or Close ran. Nil while the connection is live.
 	closedBy error
 
-	// writeMu serializes writes: frames are newline-delimited, so two
+	// writeGate serializes writes: frames are newline-delimited, so two
 	// interleaved marshals would corrupt both.
-	writeMu sync.Mutex
+	writeGate chan struct{}
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -108,7 +111,8 @@ func NewConn(r io.Reader, w io.Writer, opts ...ConnOption) *Conn {
 		defaultTimeout: defaultCallTimeout,
 		maxFrame:       defaultMaxFrame,
 		maxInbound:     defaultMaxInbound,
-		pending:        map[int64]chan subprocess.RPCResponse{},
+		pending:        map[subprocess.RPCID]chan subprocess.RPCResponse{},
+		writeGate:      make(chan struct{}, 1),
 		done:           make(chan struct{}),
 	}
 	for _, o := range opts {
@@ -121,9 +125,14 @@ func NewConn(r io.Reader, w io.Writer, opts ...ConnOption) *Conn {
 // Call sends one request and waits for the response with that id.
 //
 // ctx bounds this call and nothing else: canceling it deregisters the waiter
-// and returns ctx's error, and touches neither the connection, the plugin's
-// work, nor any other call. A plugin-reported error comes back as
-// *subprocess.RPCError (use [errors.As]); the pipe ending is [ErrGone].
+// and returns ctx's error. A best-effort host-owned rpc/cancel is attempted for
+// a published request, except terminal unload. Zero-byte dropped controls leave
+// the connection up; a partial control frame retires it. [Conn.CancelDropped]
+// counts controls that were not published completely.
+// Other calls retain their own contexts. A plugin-reported error comes back as
+// *subprocess.RPCError (use [errors.As]); deadline replies additionally match
+// context.DeadlineExceeded via [errors.Is], preserving the RPC effect state.
+// The pipe ending is [ErrGone].
 func (c *Conn) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	if _, ok := ctx.Deadline(); !ok && c.defaultTimeout > 0 {
 		var cancel context.CancelFunc
@@ -134,7 +143,15 @@ func (c *Conn) Call(ctx context.Context, method string, params any) (json.RawMes
 		return nil, fmt.Errorf("pluginhost: %s: %w", method, err)
 	}
 
-	id := c.nextID.Add(1)
+	params, ctx, end, err := prepareForwardCall(ctx, method, params)
+	if err != nil {
+		return nil, fmt.Errorf("pluginhost: %s: %w", method, err)
+	}
+	defer end()
+	id, err := c.allocateID()
+	if err != nil {
+		return nil, err
+	}
 	reply := make(chan subprocess.RPCResponse, 1)
 
 	c.mu.Lock()
@@ -157,8 +174,19 @@ func (c *Conn) Call(ctx context.Context, method string, params any) (json.RawMes
 
 	select {
 	case response := <-reply:
-		return finish(method, response)
+		return finish(ctx, method, response)
 	case <-ctx.Done():
+		// A reply already admitted locally wins over a later cancellation.
+		select {
+		case response := <-reply:
+			return finish(ctx, method, response)
+		default:
+		}
+		if method != subprocess.MethodUnload {
+			if response := c.cancelCall(id, ctx.Err()); response != nil {
+				return finish(ctx, method, *response)
+			}
+		}
 		return nil, fmt.Errorf("pluginhost: %s: %w", method, ctx.Err())
 	case <-c.done:
 		// The reader delivers a frame before it can observe EOF, so a reply
@@ -166,22 +194,34 @@ func (c *Conn) Call(ctx context.Context, method string, params any) (json.RawMes
 		// last frame a plugin wrote before exiting is an answer, not a loss.
 		select {
 		case response := <-reply:
-			return finish(method, response)
+			return finish(ctx, method, response)
 		default:
 		}
 		return nil, fmt.Errorf("pluginhost: %s: %w", method, c.gone())
 	}
 }
 
-func finish(method string, response subprocess.RPCResponse) (json.RawMessage, error) {
+func finish(ctx context.Context, method string, response subprocess.RPCResponse) (json.RawMessage, error) {
 	if response.Error != nil {
-		return nil, fmt.Errorf("pluginhost: %s: %w", method, response.Error)
+		cause := error(response.Error)
+		if ctx.Err() != nil {
+			cause = errors.Join(cause, ctx.Err())
+		} else if code, ok := applicationCode(response.Error); ok {
+			deadline, bounded := ctx.Deadline()
+			// The wire budget rounds down to milliseconds. Allow that rounding
+			// plus timer delivery skew without classifying an early unknown
+			// outcome as a local deadline expiry.
+			if code == capability.DeadlineExceeded || (code == capability.UnknownOutcome && bounded && time.Until(deadline) <= 3*time.Millisecond) {
+				cause = errors.Join(cause, context.DeadlineExceeded)
+			}
+		}
+		return nil, fmt.Errorf("pluginhost: %s: %w", method, cause)
 	}
 	return response.Result, nil
 }
 
 // Notify sends an id-less request: the plugin runs it and sends no reply
-// (plugin-sdk's Serve suppresses every response to id 0).
+// (an absent ID is the only notification form).
 func (c *Conn) Notify(method string, params any) error {
 	c.mu.Lock()
 	closed := c.closedBy
@@ -240,17 +280,46 @@ func closeIf(v any) error {
 // whose reader has gone (or that this side closed), and a partial frame
 // leaves the stream unusable either way, so the connection is failed too.
 func (c *Conn) send(ctx context.Context, request subprocess.RPCRequest) error {
-	encoded, err := json.Marshal(request)
+	encoded, budget, err := encodeFrame(request)
 	if err != nil {
 		return fmt.Errorf("encode request: %w", err)
 	}
-	encoded = append(encoded, '\n')
 	if len(encoded) > c.maxFrame {
 		return fmt.Errorf("%w: %d bytes, cap %d", ErrFrameTooLarge, len(encoded), c.maxFrame)
 	}
 
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	select {
+	case c.writeGate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return c.gone()
+	}
+	defer func() { <-c.writeGate }()
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	// Only a fixed-width numeric slot changes at publication; opaque payload
+	// encoding and allocation have already completed outside the writer.
+	if budget >= 0 {
+		remaining := time.Until(mustDeadline(ctx)).Milliseconds()
+		if remaining <= 0 {
+			return context.DeadlineExceeded
+		}
+		if remaining > int64(^uint32(0)) {
+			remaining = int64(^uint32(0))
+		}
+		for i := range 10 {
+			encoded[budget+i] = ' '
+		}
+		copy(encoded[budget:budget+10], strconv.FormatInt(remaining, 10))
+	}
+	c.mu.Lock()
+	closed := c.closedBy
+	c.mu.Unlock()
+	if closed != nil {
+		return closed
+	}
 
 	// A plugin that stops reading its stdin fills the pipe and would block
 	// this write, and every writer queued behind it, past any ctx. Streams
@@ -262,7 +331,10 @@ func (c *Conn) send(ctx context.Context, request subprocess.RPCRequest) error {
 			}
 		}
 	}
-	if _, err := c.w.Write(encoded); err != nil {
+	if n, err := c.w.Write(encoded); err != nil || n != len(encoded) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
 		wrapped := fmt.Errorf("%w: write: %w", ErrGone, err)
 		c.fail(wrapped)
 		return wrapped
@@ -319,7 +391,7 @@ func (c *Conn) read() {
 // deliver routes one frame to whoever waits for its id.
 //
 // Anything that is not a response to a pending call is dropped rather than
-// fatal: junk, invalid UTF-8, JSON null, id 0, a frame naming a method (the
+// fatal: junk, invalid UTF-8, JSON null, an absent id, a frame naming a method (the
 // plugin never initiates), and an id nobody waits for. The last is not even
 // misbehavior: it is the late reply to a call whose caller gave up. Killing
 // the connection over any of these would turn one bad line into an outage.
@@ -328,7 +400,7 @@ func (c *Conn) deliver(line []byte) {
 		subprocess.RPCResponse
 		Method string `json:"method"`
 	}
-	if err := json.Unmarshal(line, &frame); err != nil || frame.Method != "" || frame.ID == 0 {
+	if err := json.Unmarshal(line, &frame); err != nil || frame.Method != "" || frame.ID == (subprocess.RPCID{}) {
 		return
 	}
 	c.mu.Lock()

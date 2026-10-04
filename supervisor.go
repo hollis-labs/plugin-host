@@ -71,6 +71,7 @@ type Supervisor struct {
 	started        bool
 	stopped        bool
 	healthKilled   *Process
+	healthFailure  error
 
 	stopOnce   sync.Once
 	stopping   chan struct{}
@@ -219,7 +220,9 @@ func (s *Supervisor) run(p *Process) {
 		info, _ := p.ExitInfo()
 		s.mu.Lock()
 		info.SupervisorInitiatedKill = s.healthKilled == p
+		healthFailure := s.healthFailure
 		s.healthKilled = nil
+		s.healthFailure = nil
 		s.mu.Unlock()
 
 		s.mu.Lock()
@@ -229,7 +232,7 @@ func (s *Supervisor) run(p *Process) {
 		}
 		s.mu.Unlock()
 
-		next, ok := s.restart(p, info)
+		next, ok := s.restart(p, info, healthFailure)
 		if !ok {
 			return
 		}
@@ -239,7 +242,7 @@ func (s *Supervisor) run(p *Process) {
 
 // restart tries to bring a replacement up, retrying failed spawns while the
 // budget lasts. ok is false when supervision is over.
-func (s *Supervisor) restart(crashed *Process, info ExitInfo) (*Process, bool) {
+func (s *Supervisor) restart(crashed *Process, info ExitInfo, healthFailure error) (*Process, bool) {
 	notified := false
 	var lastErr error
 	if s.opts.ClassifyExit != nil {
@@ -252,9 +255,9 @@ func (s *Supervisor) restart(crashed *Process, info ExitInfo) (*Process, bool) {
 		cancel()
 	}
 	if info.SupervisorInitiatedKill {
-		lastErr = errors.Join(lastErr, ErrUnhealthy)
+		lastErr = errors.Join(lastErr, healthFailure)
 	}
-	retryable := IsTransient(lastErr)
+	retryable := IsTransient(lastErr) && !errors.Is(healthFailure, ErrProtocolMismatch)
 	if s.opts.InitFactory == nil {
 		lastErr = errors.Join(lastErr, processFailure(s.spec, "init", ErrInitFactoryRequired))
 		retryable = false
@@ -362,16 +365,27 @@ func (s *Supervisor) watch(p *Process) bool {
 			if s.isStopping() {
 				return false
 			}
-			if err == nil && health.OK {
+			if errors.Is(err, ErrHealthInconclusive) || (err == nil && health.OK) {
 				bad = 0
 				continue
 			}
 			bad++
 			if s.opts.KillAfterUnhealthy > 0 && bad >= s.opts.KillAfterUnhealthy {
 				s.mu.Lock()
-				s.healthKilled = p
+				// The first kill decision owns its cause. A later probe may
+				// observe only ErrGone after the process has been killed.
+				if s.healthKilled != p {
+					s.healthKilled = p
+					s.healthFailure = err
+					if err == nil {
+						s.healthFailure = ErrUnhealthy
+					}
+				}
 				s.mu.Unlock()
 				_ = p.Kill()
+				// Wait only for exit or host stop now. A buffered ticker event
+				// must not launch another health probe against the killed child.
+				tick = nil
 			}
 		}
 	}
