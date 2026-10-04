@@ -28,7 +28,7 @@ func TestStatusSnapshotOwnsBoundedRedactorAllocation(t *testing.T) {
 			runtime.GC()
 			runtime.ReadMemStats(&after)
 			if len(exit.StderrTail) != 64 || after.HeapAlloc > before.HeapAlloc+(2<<20) {
-				t.Errorf("visible=%d retained heap delta=%d", len(exit.StderrTail), int64(after.HeapAlloc)-int64(before.HeapAlloc))
+				t.Errorf("visible=%d heap before=%d after=%d", len(exit.StderrTail), before.HeapAlloc, after.HeapAlloc)
 			}
 			runtime.KeepAlive(exit)
 		})
@@ -61,7 +61,7 @@ func TestSupervisorStatusTerminalOwnsBoundedDiagnostics(t *testing.T) {
 				t.Fatal("classified typed cause lost")
 			}
 			if len(status.LastFailure.Cause.Error()) > 4096 || after.HeapAlloc > before.HeapAlloc+(2<<20) {
-				t.Errorf("terminal cause bytes=%d retained heap delta=%d", len(status.LastFailure.Cause.Error()), int64(after.HeapAlloc)-int64(before.HeapAlloc))
+				t.Errorf("terminal cause bytes=%d heap before=%d after=%d", len(status.LastFailure.Cause.Error()), before.HeapAlloc, after.HeapAlloc)
 			}
 			runtime.KeepAlive(status)
 			runtime.KeepAlive(sup)
