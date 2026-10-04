@@ -70,7 +70,7 @@ func (e *lifecycleEnv) activationOrder() {
 			if child.Info().ID != "fixture" {
 				return errors.New("activation preceded identity verification")
 			}
-			reply, err := child.Client().Conn().Call(ctx, "mcp/call_tool", map[string]any{"tool_name": "trace"})
+			reply, err := child.Client().Conn().Call(ctx, "mcp/call_tool", map[string]any{"tool_name": "trace", "arguments": map[string]any{}})
 			if err != nil {
 				return err
 			}
