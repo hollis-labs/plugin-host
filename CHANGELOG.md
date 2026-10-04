@@ -9,6 +9,13 @@ refuses a tag whose CHANGELOG has no heading for it.
 
 ## Unreleased
 
+### Fixed
+
+- Truncated stderr tails discard their possibly partial leading line before
+  secret and host-pattern redaction. Exact full windows that never truncated
+  retain their first line. A window without a newline remains intact within
+  the byte cap; an over-long single line cannot recover a truncated key name.
+
 ### Added
 
 - `MismatchError` carries bounded printable expected/actual identity and version

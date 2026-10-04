@@ -25,7 +25,11 @@ const defaultTailBytes = 8192
 // dropping the rest. Redaction happens in String, not Write, so a secret
 // split across a write boundary is still caught once its full text has
 // landed in the retained window; Redact separately handles a secret's
-// fragment truncated off either edge of that window.
+// fragment truncated off either edge of that window. After the window has
+// truncated, String drops the possibly partial leading line when a newline
+// remains, before any redaction. A single over-long line with no newline is
+// retained whole within the byte cap; pattern redaction cannot recover a lost
+// key name in that case. Plugins must avoid logging credentials.
 //
 // The zero value is ready to use, with defaultTailBytes as its retained
 // window and no redaction.
@@ -35,8 +39,9 @@ type Tail struct {
 	// Secrets are exact values redacted from String's output.
 	Secrets []string
 
-	mu   sync.Mutex
-	data []byte
+	mu        sync.Mutex
+	data      []byte
+	truncated bool
 }
 
 func (t *Tail) limit() int {
@@ -54,6 +59,9 @@ func (t *Tail) Write(p []byte) (int, error) {
 	defer t.mu.Unlock()
 	limit := t.limit()
 	n := len(p)
+	if len(t.data)+len(p) > limit {
+		t.truncated = true
+	}
 	if len(p) >= limit {
 		t.data = append(t.data[:0], p[len(p)-limit:]...)
 	} else {
@@ -69,7 +77,15 @@ func (t *Tail) Write(p []byte) (int, error) {
 func (t *Tail) String() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	s := Redact(string(t.data), t.Secrets)
+	raw := string(t.data)
+	// A truncated window can start inside a credential name, defeating
+	// host pattern redaction. Remove its possibly partial leading line first.
+	if t.truncated {
+		if end := strings.IndexByte(raw, '\n'); end >= 0 {
+			raw = raw[end+1:]
+		}
+	}
+	s := Redact(raw, t.Secrets)
 	if limit := t.limit(); len(s) > limit {
 		s = s[len(s)-limit:]
 	}

@@ -57,3 +57,46 @@ func TestTailZeroValueIsUsable(t *testing.T) {
 		t.Fatal(tail.String())
 	}
 }
+
+func TestTruncatedTailDropsSplitKeyBeforeHostRedaction(t *testing.T) {
+	for _, chunked := range []bool{false, true} {
+		tail := &Tail{Bytes: 32}
+		text := "PASSWORD=secret" + strings.Repeat("x", 32) + "\nCAUSE: schema failed\n"
+		if chunked {
+			for _, b := range []byte(text) {
+				_, _ = tail.Write([]byte{b})
+			}
+		} else {
+			_, _ = tail.Write([]byte(text))
+		}
+		p := &Process{tail: tail, spec: Spec{Redact: func(raw string) string {
+			if raw != "CAUSE: schema failed\n" {
+				t.Fatalf("redactor saw partial key: %q", raw)
+			}
+			return raw
+		}}}
+		if got := p.Diagnostics(); got != "CAUSE: schema failed\n" {
+			t.Fatal(got)
+		}
+	}
+}
+
+func TestTruncatedTailWithoutNewlineRemainsBoundedAndIntact(t *testing.T) {
+	tail := &Tail{Bytes: 16}
+	_, _ = tail.Write([]byte("a long single line without a boundary"))
+	if got := tail.String(); got != "thout a boundary" {
+		t.Fatalf("unexpected retained window: %q", got)
+	}
+	if len(tail.String()) != 16 {
+		t.Fatal("single-line tail dropped")
+	}
+}
+
+func TestExactlyFullTailKeepsCompleteLeadingLine(t *testing.T) {
+	const text = "CAUSE: first\nlast"
+	tail := &Tail{Bytes: len(text)}
+	_, _ = tail.Write([]byte(text))
+	if got := tail.String(); got != text {
+		t.Fatal("untruncated full window lost first line", got)
+	}
+}
