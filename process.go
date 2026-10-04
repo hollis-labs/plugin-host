@@ -225,12 +225,12 @@ func (p *Process) verify(result subprocess.InitResult) error {
 		return processFailure(p.spec, "identity", ErrNoPluginID)
 	}
 	if p.spec.ExpectedID != "" && result.ID != p.spec.ExpectedID {
-		return processFailure(p.spec, "identity", ErrIdentityMismatch)
+		return processFailure(p.spec, "identity", mismatch("id", p.spec.ExpectedID, result.ID))
 	}
 	if p.spec.ExpectedVersion != "" {
 		_, err := CompareVersions(result.Version, p.spec.ExpectedVersion)
 		if err != nil || result.Version != p.spec.ExpectedVersion {
-			return processFailure(p.spec, "version", errors.Join(ErrVersionMismatch, err))
+			return processFailure(p.spec, "version", errors.Join(mismatch("version", p.spec.ExpectedVersion, result.Version), err))
 		}
 	}
 	p.mu.Lock()
