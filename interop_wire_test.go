@@ -131,7 +131,19 @@ func interopWireTerminals(events []map[string]json.RawMessage, expectedExit int,
 // Expanded fixture helpers originate only in actual get/put commands, not in
 // Health or lifecycle calls. Derive method, argument and parent expectations
 // from published command frames; a refused extra request is still extra traffic.
-func interopExpandedHelpers(events []map[string]json.RawMessage, reverseLimit uint32) error {
+func interopExpandedHelpers(events []map[string]json.RawMessage, reverseLimit uint32, proofs ...*interopQueueProof) error {
+	reductions := map[uint64]int{}
+	if len(proofs) > 1 {
+		return errors.New("harness duplicate queue proof")
+	}
+	if len(proofs) == 1 && proofs[0] != nil {
+		id, n, err := proofs[0].reduction(events)
+		if err != nil {
+			return err
+		}
+		reductions[id] = n
+	}
+
 	type helper struct {
 		method, binding, key, operation, value string
 		remaining                              int
@@ -170,7 +182,7 @@ func interopExpandedHelpers(events []map[string]json.RawMessage, reverseLimit ui
 			return errors.New("harness invalid published fixture helper args")
 		}
 		method := "host/storage/" + command.Params.Name
-		expected[command.ID] = &helper{method: method, binding: command.Params.Context.Binding, key: args.Key, operation: args.Operation, value: strings.Repeat("v", args.ValueBytes), remaining: min(args.N, int(reverseLimit))}
+		expected[command.ID] = &helper{method: method, binding: command.Params.Context.Binding, key: args.Key, operation: args.Operation, value: strings.Repeat("v", args.ValueBytes), remaining: min(args.N, int(reverseLimit)) - reductions[command.ID]}
 	}
 	for _, e := range events {
 		if rawEventString(e, "kind") != "wire" || rawEventString(e, "direction") != "worker-to-host" || rawEventString(e, "frame_type") != "request" {

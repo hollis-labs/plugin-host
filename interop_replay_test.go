@@ -541,7 +541,7 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 				observations = append(observations, observation)
 				continue
 			}
-			supported := recipe.Scenario == "reverse" || recipe.Scenario == "effects" || recipe.Scenario == "unknown" || recipe.Scenario == "overflow" || recipe.Scenario == "cleanup-error" || recipe.Scenario == "cleanup-panic" || recipe.Scenario == "cleanup-hung" || recipe.Scenario == "receipt-restart" || recipe.Scenario == "descendants" || recipe.Scenario == "deadline" || recipe.Scenario == "host-fairness"
+			supported := recipe.Scenario == "clip" || recipe.Scenario == "queue" || recipe.Scenario == "queue-frames" || recipe.Scenario == "reverse" || recipe.Scenario == "effects" || recipe.Scenario == "unknown" || recipe.Scenario == "overflow" || recipe.Scenario == "cleanup-error" || recipe.Scenario == "cleanup-panic" || recipe.Scenario == "cleanup-hung" || recipe.Scenario == "receipt-restart" || recipe.Scenario == "descendants" || recipe.Scenario == "deadline" || recipe.Scenario == "host-fairness"
 			if !supported {
 				observation["status"] = "pending"
 				observation["owner"] = "plugin-host interop adapter (slice5)"
@@ -564,6 +564,8 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 					p, c = startInteropExpanded(t, runtime, recipe, b)
 				}
 				switch recipe.Scenario {
+				case "clip", "queue", "queue-frames":
+					replayInteropQueue(t, p, c, b, runtime, recipe, observation)
 				case "deadline":
 					replayInteropRawDeadline(t, p, c, b, observation)
 				case "reverse":
@@ -604,6 +606,10 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 				}
 				if observation["finished"] == nil {
 					observation["finished"] = finishInteropExpanded(t, p, c, 0)
+				}
+				if c.queueProof != nil {
+					auditInteropQueueCopies(t, c)
+					observation["queue_copied_trace_adverse_audit"] = true
 				}
 				if recipe.Scenario == "deadline" {
 					auditInteropRawDeadline(t, c.observed)
