@@ -317,6 +317,9 @@ func (w *interopEventWriter) failure() error {
 
 type interopControls struct {
 	queueProof           *interopQueueProof
+	childProof           *interopChildProof
+	childStream          atomic.Bool
+	childOutputSequence  atomic.Uint64
 	hungProof            *interopHungProof
 	privatePlan          *interopPrivatePlan
 	privateWrites        []interopWriteWitness
@@ -449,7 +452,7 @@ func (c *interopControls) finish(expectedCode int) error {
 					}
 				}
 			}
-			if !errors.Is(err, io.EOF) || (c.hungProof != nil && err != io.EOF) { //nolint:errorlint // A joined EOF also carries a fatal selected-case observer failure.
+			if !errors.Is(err, io.EOF) || ((c.hungProof != nil || c.childProof != nil) && err != io.EOF) { //nolint:errorlint // A joined EOF also carries a fatal selected-case observer failure.
 				return fmt.Errorf("harness terminal observer: %w", err)
 			}
 			exits, finished := 0, 0
@@ -474,6 +477,11 @@ func (c *interopControls) finish(expectedCode int) error {
 				wireEvents, guardErr = c.privatePlan.guard(c.observed, c.privateWrites)
 				if guardErr != nil {
 					return guardErr
+				}
+			}
+			if c.childProof != nil {
+				if err := c.childProof.guard(c.observed, expectedCode); err != nil {
+					return err
 				}
 			}
 			terminalExit := expectedCode
@@ -611,6 +619,9 @@ func spawnInteropChild(t *testing.T, runtime, mode string, services HostServices
 			if err = json.Unmarshal(v.Event["kind"], &kind); err != nil || kind == "" {
 				c.failure <- errors.New("invalid fixture event kind")
 				return
+			}
+			if c.childStream.Load() && kind == "wire" && rawEventString(v.Event, "direction") == "worker-to-host" {
+				v.Event["child_output_sequence"], _ = json.Marshal(c.childOutputSequence.Add(1))
 			}
 			if err := c.enqueue(v.Event); err != nil {
 				c.failure <- err

@@ -146,3 +146,25 @@ errors fail; shared cancellation and other scenario guards remain unchanged.
 Actual SDK final reserved-frame snapshots are retained as observed and are not
 projected into product Conn credit counters. This closes no other remaining
 family or full mandatory/application/security/SDK/operational obligation.
+
+Child-writer fairness uses the authored `child-fairness` selector on exact
+`ea8ec0d`, with the genuine Init/Load lifecycle and a finite host-issued
+StorageGet binding. This is an explicit mapping of the driver's fake host,
+not raw equality with its literal binding. The real Conn publishes thirteen
+initial absent-context Health calls, one get command and eight one-use Health
+refills. Each refill follows an owned physical Health reply, successful local
+completion and retirement of that call's physical writer credit. The socket
+reader records worker stdout order before consumers can reorder observations.
+Eight ordinary helper requests reset the control burst; the bound is four while
+ordinary work remains. Source snapshots, actual host occupancy, typed results,
+helper indices and backend authority are retained in each runtime receipt.
+
+Completion half-closes stdin after all owned work. It requires natural worker
+and bridge exit zero, one SDK cleanup, no Unload input, strict observer EOF and
+all local custody retired before fallback. The selected guard rejects extra
+balanced inputs, notifications, duplicate or missing terminals/helpers, foreign
+identity, false credit receipts and late joined observer failures. Shared
+validators, HUNG and private host fairness retain their existing behavior.
+These receipts cover this selected case only; raw forward/credit lifecycle,
+disconnect and the wider mandatory ledger remain pending. They do not establish
+full profile, SDK release, consumer or live acceptance.
