@@ -86,6 +86,9 @@ func (p *interopQueueProof) reduction(events []map[string]json.RawMessage) (uint
 	if p == nil || p.Ref != p.expected || p.Ref.Run == "" || p.Ref.Source != "ea8ec0dca862d0c7284cc6a130a4b27fb812ed21" || p.Ref.Manifest != "30cb07b87060dc88e9cb6ac5414f7b9cb7bb19c7a97c058e284d96e1e59ff4a9" || p.Ref.Corpus != 1 || p.Ref.Selector != 1 || (p.Ref.Runtime != "go" && p.Ref.Runtime != "node" && p.Ref.Runtime != "deno") {
 		return fail()
 	}
+	if err := p.inputInventory(events); err != nil {
+		return 0, 0, err
+	}
 	n, published := 1, 0
 	name, profile, grant, args := "put", "expanded-queue", "g-StoragePut", `{"key":"write","n":1,"operation_key":"queued","value_bytes":65536}`
 	if p.Ref.Scenario == "queue-frames" {
@@ -545,4 +548,51 @@ func auditInteropQueueCopies(t *testing.T, c *interopControls) {
 	if original.Ref.Scenario != "clip" && interopExpandedHelpers(c.observed, c.expandedReverseLimit) == nil {
 		t.Fatal("absent scoped local-refusal proof accepted actual trace")
 	}
+}
+
+// The compiled producers for these selected scenarios perform one genuine
+// Init/Load, one barrier Health, one bound command, then one terminal Unload.
+// They issue no cancellation action. A published target or balanced pair is
+// not an additional test-owned input intent. Shared scenarios retain their own
+// caller/deadline/descendant controls and receipt validation unchanged.
+func (p *interopQueueProof) inputInventory(events []map[string]json.RawMessage) error {
+	counts := map[string]int{}
+	for _, e := range events {
+		if rawEventString(e, "kind") != "wire" {
+			continue
+		}
+		kind := rawEventString(e, "frame_type")
+		if kind == "notification" {
+			return errors.New("harness queue scenario has no owned notification action")
+		}
+		if kind != "request" || rawEventString(e, "direction") != "host-to-worker" {
+			continue
+		}
+		var id uint64
+		if json.Unmarshal(e["id"], &id) != nil || id == 0 {
+			return errors.New("harness queue input ID")
+		}
+		method := rawEventString(e, "method")
+		switch method {
+		case subprocess.MethodInit, subprocess.MethodLoad, subprocess.MethodUnload:
+			// Resolve actual physical lifecycle IDs; no numeric ID allowlist.
+		case subprocess.MethodHealth:
+			if id != p.HealthID {
+				return errors.New("harness unowned queue Health input")
+			}
+		case subprocess.MethodCommandExecute:
+			if id != p.CommandID {
+				return errors.New("harness unowned queue command input")
+			}
+		default:
+			return errors.New("harness unowned queue forward method")
+		}
+		counts[method]++
+	}
+	for _, method := range []string{subprocess.MethodInit, subprocess.MethodLoad, subprocess.MethodUnload, subprocess.MethodHealth, subprocess.MethodCommandExecute} {
+		if counts[method] != 1 {
+			return fmt.Errorf("harness queue input intent %s count=%d", method, counts[method])
+		}
+	}
+	return nil
 }

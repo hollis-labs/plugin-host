@@ -409,6 +409,10 @@ func queueGuardFixture(frames bool) (*interopQueueProof, []map[string]json.RawMe
 	}
 	content, _ := json.Marshal(p.Outcomes)
 	events = append(events, queueGuardWire("worker-to-host", "response", p.CommandID, "", nil, map[string]any{"content": string(content)}))
+	for i, method := range []string{subprocess.MethodInit, subprocess.MethodLoad, subprocess.MethodUnload} {
+		id := uint64(900 + i)
+		events = append(events, queueGuardWire("host-to-worker", "request", id, method, map[string]any{}, nil), queueGuardWire("worker-to-host", "response", id, "", nil, map[string]any{}))
+	}
 	return p, events
 }
 func TestInteropQueueScopedProof(t *testing.T) {
@@ -476,5 +480,32 @@ func TestInteropQueueScopedProof(t *testing.T) {
 				t.Fatal("published local-refused mutation accepted")
 			}
 		})
+	}
+}
+
+func TestInteropQueueRejectsUnownedInputsAtEOF(t *testing.T) {
+	for _, frames := range []bool{false, true} {
+		proof, events := queueGuardFixture(frames)
+		finish := func(observed []map[string]json.RawMessage) error {
+			c := &interopControls{queueProof: proof, expandedReverseLimit: 8, observed: observed, events: make(chan map[string]json.RawMessage), failure: make(chan error, 1)}
+			c.failure <- io.EOF
+			// Own worker exit/finished evidence accompanies the complete physical trace.
+			c.observed = append(c.observed, queueGuardEvent(map[string]any{"kind": "finished"}), queueGuardEvent(map[string]any{"kind": "worker_exit", "exit_code": 0}))
+			return c.finish(0)
+		}
+		if err := finish(events); err != nil {
+			t.Fatal("canonical", err)
+		}
+		cancel := map[string]any{"jsonrpc": "2.0", "method": "rpc/cancel", "params": map[string]any{"request_owner": "host", "id": proof.HealthID, "reason": "caller_cancelled"}} //nolint:misspell // Exact protocol reason.
+		raw, _ := json.Marshal(cancel)
+		raw = append(raw, '\n')
+		notification := queueGuardEvent(map[string]any{"kind": "wire", "direction": "host-to-worker", "frame_type": "notification", "method": "rpc/cancel", "raw": string(raw), "bytes": len(raw)})
+		if finish(append(append([]map[string]json.RawMessage{}, events...), notification)) == nil {
+			t.Fatal("completed published Health target authorized an unowned cancellation")
+		}
+		paired := append(append([]map[string]json.RawMessage{}, events...), queueGuardWire("host-to-worker", "request", proof.CommandID+100, "plugin/health", map[string]any{}, nil), queueGuardWire("worker-to-host", "response", proof.CommandID+100, "", nil, map[string]any{"ok": true}))
+		if finish(paired) == nil {
+			t.Fatal("balanced extra Health pair authorized an unowned input")
+		}
 	}
 }
