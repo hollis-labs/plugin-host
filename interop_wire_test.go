@@ -762,3 +762,255 @@ func (p *interopChildProof) guard(events []map[string]json.RawMessage, exit int)
 	}
 	return interopExpandedHelpers(events, 8)
 }
+
+// A selected disconnect owns complete actual inputs and no control action.
+// Its one missing terminal is an admitted read, not a global EOF waiver.
+func (p *interopDisconnectProof) guard(events []map[string]json.RawMessage, exit int) ([]map[string]json.RawMessage, error) {
+	fail := func() ([]map[string]json.RawMessage, error) {
+		return nil, errors.New("harness disconnect physical ownership/cause/custody")
+	}
+	if p == nil || p.Ref != p.expected || p.Ref.Run == "" || p.Ref.Scenario != "disconnect" || p.Ref.Profile != "expanded" || exit != 0 || p.CommandID == 0 || p.ReverseID == 0 || p.Binding == "" || p.WriterOverflow || !p.CustodyRetired || !p.ParentRetired || !p.SessionFenced || p.BackendEntries != 1 || p.BackendReturns != 1 || p.BeforePermit != 1 || p.AfterPermit != 0 || p.AfterPool != 0 || p.BackendCause != "context canceled" || p.BackendKey != "read" || (!p.CancellationParentRetired && !p.CancellationSessionFenced) || p.CommitRefusal == "" || p.BackendEnteredAt.IsZero() || !p.HalfcloseAt.After(p.BackendEnteredAt) || !p.BackendReturnedAt.After(p.HalfcloseAt) {
+		return fail()
+	}
+	a := p.Authority
+	if a.Parent.ID != p.CommandID || a.Parent.RequestOwner != "host" || string(a.BindingID) != p.Binding || a.Grant.GrantID != "g-StorageGet" || a.Method != HostStorageGet || !a.Deadline.After(p.BackendReturnedAt) {
+		return fail()
+	}
+	if p.PublicDelivery != "SUCCEEDED" && (p.PublicDelivery != "FAILED" || p.PublicError == "" || !p.PublicTransportCause || p.ConnError == "") {
+		return fail()
+	}
+	inputs := map[uint64]interopDisconnectWrite{}
+	replyAttempts := 0
+	for _, w := range p.Writes {
+		fields, err := strictjson.ObjectFields([]byte(w.Raw), []string{"jsonrpc", "id"}, []string{"method", "params", "result", "error"})
+		if err != nil || string(fields["jsonrpc"]) != `"2.0"` {
+			return fail()
+		}
+		var id uint64
+		var method string
+		if json.Unmarshal(fields["id"], &id) != nil || id == 0 {
+			return fail()
+		}
+		_ = json.Unmarshal(fields["method"], &method)
+		if method == "" {
+			if id != p.ReverseID || w.Bytes != 0 || w.Error == "" || !w.ClosedPipe || w.At.Before(p.HalfcloseAt) {
+				return fail()
+			}
+			replyAttempts++
+			continue
+		}
+		if _, err := strictjson.Object([]byte(w.Raw), "jsonrpc", "id", "method", "params"); err != nil {
+			return fail()
+		}
+		if inputs[id].Raw != "" || w.Bytes != len(w.Raw) || w.Error != "" || w.At.After(p.HalfcloseAt) {
+			return fail()
+		}
+		if method != subprocess.MethodInit && method != subprocess.MethodLoad && method != subprocess.MethodCommandExecute {
+			return fail()
+		}
+		inputs[id] = w
+	}
+	if (replyAttempts == 0 && p.ReplyDisposition != "NO_ATTEMPT_FENCED") || (replyAttempts > 0 && p.ReplyDisposition != "ZERO_BYTE_NATIVE_FAILURE") || len(inputs) != 3 || len(p.Writes) != 3+replyAttempts {
+		return fail()
+	}
+	// No attempt is different from a proved zero-byte closed-pipe attempt. Either
+	// must be reconciled with actual closed/fenced once-only custody above.
+	if p.PublicDelivery == "FAILED" && replyAttempts == 0 && p.ConnError == "" {
+		return fail()
+	}
+	counts := map[string]int{}
+	loadEntered, loadReturned, getEntered, getReturned, helpers, cleanup, finished, loadCompletedAbort, ready, initClient, ack := 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+	inputSeen := map[uint64]bool{}
+	outputSequences := map[uint64]string{}
+	var filtered []map[string]json.RawMessage
+	for _, e := range events {
+		kind := rawEventString(e, "kind")
+		var id uint64
+		_ = json.Unmarshal(e["id"], &id)
+		switch kind {
+		case "ready":
+			ready++
+		case "init_client":
+			var client bool
+			if json.Unmarshal(e["client"], &client) != nil || !client {
+				return fail()
+			}
+			initClient++
+		case "control_received":
+			var seq int
+			if json.Unmarshal(e["seq"], &seq) != nil || seq != 1 {
+				return fail()
+			}
+			ack++
+		case "worker_exit":
+		case "entered":
+			var d bool
+			if json.Unmarshal(e["deadline"], &d) != nil || !d {
+				return fail()
+			}
+			if id == p.Lifecycle[subprocess.MethodLoad] && rawEventString(e, "name") == "load" {
+				loadEntered++
+			} else if id == p.CommandID && rawEventString(e, "name") == "get" {
+				getEntered++
+			} else {
+				return fail()
+			}
+		case "returned":
+			switch id {
+			case p.Lifecycle[subprocess.MethodLoad]:
+				loadReturned++
+			case p.CommandID:
+				getReturned++
+			default:
+				return fail()
+			}
+		case "helper_done":
+			var index int
+			var result interopHelperOutcome
+			if id != p.CommandID || json.Unmarshal(e["index"], &index) != nil || index != 0 || json.Unmarshal(e["failure"], &result) != nil || result.Code != "target_unavailable" || result.EffectState != "unknown" {
+				return fail()
+			}
+			helpers++
+		case "unload_started":
+			cleanup++
+		case "finished":
+			var v map[string]int
+			if json.Unmarshal(e["effects"], &v) != nil || v["entered"] != 2 || v["load"] != 1 || v["get"] != 1 || v["returned"] != 1 || v["unload_attempts"] != 1 || v["health"] != 0 || v["commits"] != 0 || v["reverse_pending"] != 0 || v["ordinary_queued"] != 0 || v["control_queued"] != 0 || v["reserved_frames"] != 0 || v["reserved_bytes"] != 0 || rawEventString(e, "transport_error") != "" {
+				return fail()
+			}
+			finished++
+		case "aborted":
+			var deadline bool
+			if id != p.Lifecycle[subprocess.MethodLoad] || json.Unmarshal(e["deadline"], &deadline) != nil || deadline {
+				return fail()
+			}
+			loadCompletedAbort++
+		case "control_failure", "writer_waiting", "snapshot":
+			return fail()
+		case "wire":
+			dir, typ, method := rawEventString(e, "direction"), rawEventString(e, "frame_type"), rawEventString(e, "method")
+			if typ == "notification" || (dir != "host-to-worker" && dir != "worker-to-host") {
+				return fail()
+			}
+			var n int
+			if json.Unmarshal(e["bytes"], &n) != nil || n <= 0 {
+				return fail()
+			}
+			if dir == "host-to-worker" {
+				if typ != "request" || inputSeen[id] || inputs[id].Raw == "" {
+					return fail()
+				}
+				w := inputs[id]
+				hash := fmt.Sprintf("%x", sha256.Sum256([]byte(w.Raw)))
+				if n != len(w.Raw) || rawEventString(e, "sha256") != hash {
+					return fail()
+				}
+				var frame struct {
+					Method string          `json:"method"`
+					Params json.RawMessage `json:"params"`
+				}
+				if json.Unmarshal([]byte(w.Raw), &frame) != nil || frame.Method != method {
+					return fail()
+				}
+				switch method {
+				case subprocess.MethodInit, subprocess.MethodLoad:
+					if id != p.Lifecycle[method] || id == p.CommandID {
+						return fail()
+					}
+				case subprocess.MethodCommandExecute:
+					fields, err := strictjson.Object(frame.Params, "name", "args", "session_id", "context")
+					if err != nil || id != p.CommandID || string(fields["name"]) != `"get"` || string(fields["session_id"]) != `""` {
+						return fail()
+					}
+					var args string
+					var ctx struct {
+						Binding string `json:"binding_id"`
+						Timeout uint32 `json:"timeout_ms"`
+					}
+					if json.Unmarshal(fields["args"], &args) != nil || json.Unmarshal(fields["context"], &ctx) != nil || ctx.Binding != p.Binding || ctx.Timeout == 0 || ctx.Timeout > 10000 {
+						return fail()
+					}
+					values, err := strictjson.Object([]byte(args), "n", "key")
+					if err != nil || string(values["n"]) != "1" || string(values["key"]) != `"read"` {
+						return fail()
+					}
+				default:
+					return fail()
+				}
+				counts[method]++
+				inputSeen[id] = true
+			} else {
+				raw := []byte(rawEventString(e, "raw"))
+				hash := fmt.Sprintf("%x", sha256.Sum256(raw))
+				if len(raw) != n || rawEventString(e, "sha256") != hash {
+					return fail()
+				}
+				var seq uint64
+				if json.Unmarshal(e["child_output_sequence"], &seq) != nil || seq == 0 || outputSequences[seq] != "" {
+					return fail()
+				}
+				if typ == "request" {
+					if method != string(HostStorageGet) || id != p.ReverseID {
+						return fail()
+					}
+					fields, err := strictjson.Object(raw, "jsonrpc", "id", "method", "params")
+					if err != nil || string(fields["jsonrpc"]) != `"2.0"` || string(fields["method"]) != `"host/storage/get"` {
+						return fail()
+					}
+					var requestID uint64
+					_ = json.Unmarshal(fields["id"], &requestID)
+					if requestID != id {
+						return fail()
+					}
+					values, err := strictjson.Object(fields["params"], "grant_id", "key", "context")
+					if err != nil || string(values["grant_id"]) != `"g-StorageGet"` || string(values["key"]) != `"read"` {
+						return fail()
+					}
+					var ctx struct {
+						Binding string                `json:"binding_id"`
+						Timeout uint32                `json:"timeout_ms"`
+						Parent  subprocess.ParentCall `json:"parent_call"`
+					}
+					if json.Unmarshal(values["context"], &ctx) != nil || ctx.Binding != p.Binding || ctx.Timeout == 0 || ctx.Timeout > 10000 || ctx.Parent != a.Parent {
+						return fail()
+					}
+					outputSequences[seq] = "read"
+					continue // The sole selected unanswered terminal; original helper audit follows.
+				}
+				if typ != "response" {
+					return fail()
+				}
+				fields, err := strictjson.Object(raw, "jsonrpc", "id", "result")
+				var actualID uint64
+				if err != nil || string(fields["jsonrpc"]) != `"2.0"` || json.Unmarshal(fields["id"], &actualID) != nil || actualID != id {
+					return fail()
+				}
+				switch id {
+				case p.Lifecycle[subprocess.MethodInit]:
+					outputSequences[seq] = "init"
+				case p.Lifecycle[subprocess.MethodLoad]:
+					outputSequences[seq] = "load"
+				case p.CommandID:
+					if _, err := strictjson.Object(fields["result"], "action", "content"); err != nil {
+						return fail()
+					}
+					var result subprocess.CommandExecResult
+					var outcomes []interopHelperOutcome
+					if strictjson.Validate(fields["result"]) != nil || json.Unmarshal(fields["result"], &result) != nil || result.Action != "message" || json.Unmarshal([]byte(result.Content), &outcomes) != nil || len(outcomes) != 1 || outcomes[0].Code != "target_unavailable" || outcomes[0].EffectState != "unknown" || string(fields["result"]) != string(p.PhysicalResult) {
+						return fail()
+					}
+					outputSequences[seq] = "command"
+				default:
+					return fail()
+				}
+			}
+		default:
+			return fail()
+		}
+		filtered = append(filtered, e)
+	}
+	if ready != 1 || initClient != 1 || ack != 1 || len(p.ControlTrace) != 1 || p.ControlTrace[0] != "release:request-2/ack:1" || counts[subprocess.MethodInit] != 1 || counts[subprocess.MethodLoad] != 1 || counts[subprocess.MethodCommandExecute] != 1 || len(inputSeen) != 3 || loadEntered != 1 || loadReturned != 1 || getEntered != 1 || getReturned != 1 || helpers != 1 || cleanup != 1 || finished != 1 || loadCompletedAbort > 1 || len(outputSequences) != 4 || outputSequences[1] != "init" || outputSequences[2] != "load" || outputSequences[3] != "read" || outputSequences[4] != "command" {
+		return fail()
+	}
+	return filtered, nil
+}
