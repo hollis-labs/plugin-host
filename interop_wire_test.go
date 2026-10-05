@@ -113,6 +113,7 @@ func (p *interopLifecycleProof) guard(events []map[string]json.RawMessage, exit 
 	helperIndices := map[int]bool{}
 	init, load, hold, get, finished, workerExit, cleanup := 0, 0, 0, 0, 0, 0, 0
 	var lastSequence uint64
+	var previousCounters map[string]int
 	// Consumption order can differ from physical child order; ingress ordinals
 	// are independently unique and retained for all physical worker frames.
 	sequences := map[uint64]bool{}
@@ -126,10 +127,11 @@ func (p *interopLifecycleProof) guard(events []map[string]json.RawMessage, exit 
 			controlACKs[seq] = true
 		case "snapshot":
 			snapshotEvents++
-			var effects map[string]int
-			if json.Unmarshal(e["effects"], &effects) != nil || effects == nil || effects["commits"] != 0 || effects["unload_attempts"] != 0 || effects["health"] != 0 || effects["put"] != 0 {
+			effects, err := lifecyclePhysicalCounters(e["effects"], holds, reverseCount/8, false, previousCounters)
+			if err != nil {
 				return fail()
 			}
+			previousCounters = effects
 			expected := p.Released
 			switch snapshotEvents {
 			case 1:
@@ -372,8 +374,8 @@ func (p *interopLifecycleProof) guard(events []map[string]json.RawMessage, exit 
 			cleanup++
 		case "finished":
 			finished++
-			var effects map[string]int
-			if json.Unmarshal(e["effects"], &effects) != nil || effects["returned"] != 16 || effects["entered"] != 19 || effects["load"] != 3 || effects["unload_attempts"] != 1 || effects["commits"] != 0 || effects["reverse_pending"] != 0 || effects["reserved_frames"] != 0 || effects["reserved_bytes"] != 0 {
+			effects, err := lifecyclePhysicalCounters(e["effects"], holds, reverseCount/8, true, previousCounters)
+			if err != nil || effects["returned"] != 16 || effects["entered"] != 19 || effects["load"] != 3 || effects["unload_attempts"] != 1 || effects["commits"] != 0 || effects["reverse_pending"] != 0 || effects["reserved_frames"] != 0 || effects["reserved_bytes"] != 0 {
 				return fail()
 			}
 		case "worker_exit":
@@ -1396,4 +1398,47 @@ func (p *interopDisconnectProof) guard(events []map[string]json.RawMessage, exit
 		return fail()
 	}
 	return filtered, nil
+}
+
+// Validate physical counters before reduction: omitted cumulative zeros are
+// genuine worker output, while explicit nulls and unknown effects are not zero.
+func lifecyclePhysicalCounters(raw json.RawMessage, holds, gets int, cleaned bool, previous map[string]int) (map[string]int, error) {
+	if err := strictjson.Validate(raw); err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return nil, errors.New("invalid physical counter object")
+	}
+	for _, key := range []string{"entered", "load", "reverse_pending", "ordinary_queued", "control_queued", "reserved_frames", "reserved_bytes"} {
+		if _, ok := fields[key]; !ok {
+			return nil, fmt.Errorf("missing physical counter %s", key)
+		}
+	}
+	limits := map[string]uint64{"entered": 19, "load": 3, "hold": uint64(holds), "get": uint64(gets), "returned": 16, "unload_attempts": 1, "reverse_pending": uint64(gets * 8), "ordinary_queued": 21, "control_queued": 21, "reserved_frames": 18, "reserved_bytes": 18432, "commits": 0, "health": 0, "put": 0}
+	counters := make(map[string]int, len(fields))
+	for key, value := range fields {
+		var n uint64
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) || json.Unmarshal(value, &n) != nil || n > 9007199254740991 {
+			return nil, fmt.Errorf("invalid physical counter %s", key)
+		}
+		// An unauthored counter may only report zero; it cannot hide an effect.
+		if n > limits[key] {
+			return nil, fmt.Errorf("physical counter exceeds domain %s", key)
+		}
+		counters[key] = int(n) // Domain bounds above fit every supported Go int.
+	}
+	for _, key := range []string{"entered", "load", "hold", "get", "returned"} {
+		if counters[key] < previous[key] {
+			return nil, fmt.Errorf("decreasing physical counter %s", key)
+		}
+	}
+	cleanup := 0
+	if cleaned {
+		cleanup = 1
+	}
+	if counters["entered"] != counters["load"]+counters["hold"]+counters["get"] || counters["returned"] > counters["hold"]+counters["get"] || counters["unload_attempts"] != cleanup || counters["reserved_bytes"] != counters["reserved_frames"]*1024 {
+		return nil, errors.New("inconsistent physical counter ledger")
+	}
+	return counters, nil
 }

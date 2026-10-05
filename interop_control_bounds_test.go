@@ -22,7 +22,7 @@ import (
 
 func lifecycleGuardExample() (*interopLifecycleProof, []map[string]json.RawMessage) {
 	ref := interopQueueRef{Source: strings.Repeat("a", 40), Manifest: strings.Repeat("b", 64), Recipe: "authored-example", Scenario: "forward-v2", Profile: "expanded", Runtime: "go", Run: "owned-run", Corpus: 1, Selector: 1}
-	p := &interopLifecycleProof{Ref: ref, expected: ref, Deadline: time.Now().Add(time.Second), Inputs: map[uint64]interopLifecycleInput{}, Startup: map[string]int{"entered": 1, "load": 1}, Saturated: map[string]int{"entered": 19, "load": 3, "hold": 16, "reserved_frames": 18, "reserved_bytes": 18432}, Released: map[string]int{"returned": 16}, LocalOrdinaryRefused: true, LocalLifecycleRefused: true, CustodyRetired: true, Halfclosed: true}
+	p := &interopLifecycleProof{Ref: ref, expected: ref, Deadline: time.Now().Add(time.Second), Inputs: map[uint64]interopLifecycleInput{}, Startup: map[string]int{"entered": 1, "load": 1}, Saturated: map[string]int{"entered": 19, "load": 3, "hold": 16, "reserved_frames": 18, "reserved_bytes": 18432}, Released: map[string]int{"entered": 19, "load": 3, "hold": 16, "returned": 16}, LocalOrdinaryRefused: true, LocalLifecycleRefused: true, CustodyRetired: true, Halfclosed: true}
 	p.BeforeRefusal = interopLifecycleLocal{NextID: 20, Ordinary: 16, Lifecycle: 2, Pending: 18, Correlations: 16, Reserved: 18, PhysicalWrites: 20}
 	p.AfterOverflow = map[string]int{"entered": 19, "load": 3, "hold": 16, "reserved_frames": 18, "reserved_bytes": 18432}
 	p.InitParams = json.RawMessage(`{}`)
@@ -72,11 +72,16 @@ func lifecycleGuardExample() (*interopLifecycleProof, []map[string]json.RawMessa
 		}
 	}
 	for _, effects := range []map[string]int{p.Startup, p.Saturated, p.AfterOverflow, p.Released} {
+		for _, key := range []string{"reverse_pending", "ordinary_queued", "control_queued", "reserved_frames", "reserved_bytes"} {
+			if _, ok := effects[key]; !ok {
+				effects[key] = 0
+			}
+		}
 		seq := len(p.ControlTrace) + 1
 		p.ControlTrace = append(p.ControlTrace, fmt.Sprintf("release:snapshot/ack:%d", seq))
 		events = append(events, queueGuardEvent(map[string]any{"kind": "control_received", "seq": seq}), queueGuardEvent(map[string]any{"kind": "snapshot", "effects": effects}))
 	}
-	events = append(events, queueGuardEvent(map[string]any{"kind": "unload_started"}), queueGuardEvent(map[string]any{"kind": "finished", "effects": map[string]int{"entered": 19, "load": 3, "returned": 16, "unload_attempts": 1}}), queueGuardEvent(map[string]any{"kind": "worker_exit", "exit_code": 0}))
+	events = append(events, queueGuardEvent(map[string]any{"kind": "unload_started"}), queueGuardEvent(map[string]any{"kind": "finished", "effects": map[string]int{"entered": 19, "load": 3, "hold": 16, "returned": 16, "unload_attempts": 1, "reverse_pending": 0, "ordinary_queued": 0, "control_queued": 0, "reserved_frames": 0, "reserved_bytes": 0}}), queueGuardEvent(map[string]any{"kind": "worker_exit", "exit_code": 0}))
 	return p, events
 }
 
@@ -988,5 +993,114 @@ func TestInteropDisconnectTransportErrorDoesNotMaskJoinedFailure(t *testing.T) {
 		if ok, _ := interopDisconnectTransportError(errors.Join(native, errors.New("late control failure"))); ok {
 			t.Fatal("joined harness failure hidden")
 		}
+	}
+}
+
+func TestInteropLifecycleRawCounters(t *testing.T) {
+	for _, kind := range []string{"snapshot", "finished"} {
+		for _, variant := range []string{"sparse-zero", "null", "unknown-effect", "missing", "string", "negative", "fraction", "unsafe", "put", "health", "credit-bytes", "domain", "returned-inventory"} {
+			t.Run(kind+"/"+variant, func(t *testing.T) {
+				p, events := lifecycleGuardExample()
+				for _, event := range events {
+					if rawEventString(event, "kind") != kind {
+						continue
+					}
+					var effects map[string]json.RawMessage
+					if err := json.Unmarshal(event["effects"], &effects); err != nil {
+						t.Fatal(err)
+					}
+					switch variant {
+					case "sparse-zero":
+						delete(effects, "commits")
+						delete(effects, "put")
+						delete(effects, "health")
+					case "null":
+						effects["commits"] = json.RawMessage(`null`)
+					case "unknown-effect":
+						effects["unapproved_effect"] = json.RawMessage(`1`)
+					case "missing":
+						delete(effects, "entered")
+					case "string":
+						effects["commits"] = json.RawMessage(`"0"`)
+					case "negative":
+						effects["commits"] = json.RawMessage(`-1`)
+					case "fraction":
+						effects["commits"] = json.RawMessage(`0.5`)
+					case "unsafe":
+						effects["commits"] = json.RawMessage(`9007199254740992`)
+					case "put":
+						effects["put"] = json.RawMessage(`1`)
+					case "health":
+						effects["health"] = json.RawMessage(`1`)
+					case "credit-bytes":
+						effects["reserved_bytes"] = json.RawMessage(`1`)
+					case "domain":
+						effects["ordinary_queued"] = json.RawMessage(`22`)
+					case "returned-inventory":
+						effects["returned"] = json.RawMessage(`17`)
+					}
+					event["effects"], _ = json.Marshal(effects)
+					break
+				}
+				err := p.guard(events, 0)
+				if variant == "sparse-zero" {
+					if err != nil {
+						t.Fatal("genuine sparse zeros refused", err)
+					}
+				} else if err == nil {
+					t.Fatal("invalid physical counters accepted")
+				}
+			})
+		}
+	}
+}
+
+func TestInteropLifecycleEveryPhysicalCounterEvent(t *testing.T) {
+	for index := 0; index < 5; index++ {
+		for _, field := range []string{"commits", "unapproved_effect"} {
+			t.Run(fmt.Sprintf("event-%d/%s", index, field), func(t *testing.T) {
+				p, events := lifecycleGuardExample()
+				seen := 0
+				for _, e := range events {
+					if kind := rawEventString(e, "kind"); kind != "snapshot" && kind != "finished" {
+						continue
+					}
+					if seen == index {
+						var counters map[string]json.RawMessage
+						if err := json.Unmarshal(e["effects"], &counters); err != nil {
+							t.Fatal(err)
+						}
+						value := json.RawMessage(`1`)
+						if field == "commits" {
+							value = json.RawMessage(`null`)
+						}
+						counters[field] = value
+						e["effects"], _ = json.Marshal(counters)
+						break
+					}
+					seen++
+				}
+				if err := p.guard(events, 0); err == nil {
+					t.Fatal("malformed intermediate or final counter accepted")
+				}
+			})
+		}
+	}
+}
+
+func TestInteropLifecycleMovingPhysicalCustody(t *testing.T) {
+	previous := map[string]int{"entered": 19, "load": 3, "hold": 15, "get": 1, "returned": 16}
+	// Queue and credit occupancy may change after callback return. Cumulative
+	// counters retain their actual values; occupancy is not a monotonic effect.
+	for _, frames := range []int{18, 7, 0} {
+		raw, err := json.Marshal(map[string]int{"entered": 19, "load": 3, "hold": 15, "get": 1, "returned": 16, "reverse_pending": 0, "ordinary_queued": 0, "control_queued": frames, "reserved_frames": frames, "reserved_bytes": frames * 1024})
+		if err != nil {
+			t.Fatal(err)
+		}
+		next, err := lifecyclePhysicalCounters(raw, 15, 1, false, previous)
+		if err != nil {
+			t.Fatal("legal moving custody refused", err)
+		}
+		previous = next
 	}
 }
