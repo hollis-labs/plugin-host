@@ -216,3 +216,46 @@ policy is not substituted. Constructed guard tests and copied actual-trace
 mutations remain distinct from genuine runtime executions. This bounded recipe
 never closes public-delivery robustness, raw forward/credits lifecycle gaps or
 the full security/application/hooks/SDK/release/consumer/live ledger.
+
+### Isolated lifecycle-compatible candidate validation
+
+`scripts/interop-lifecycle-compatible.sh` consumes an explicitly permitted
+immutable SDK source head and standalone manifest hash. It archives into a new
+source-keyed directory, builds one Go child through heavytest when needed, and
+records exact TS assets and runtime versions. An explicitly permitted SDK-author
+build may instead be reused through `INTEROP_LIFECYCLE_ASSET_DIR`; supply the
+verified `INTEROP_LIFECYCLE_IMPORT_SHA256`. The launcher checks the child and
+complete TS dist inventory against that receipt and retains original build
+attribution without rebuilding. Historical ea8 assets and reports remain
+separate. The host module stays pinned to 5c663e7; these assets are test fixtures.
+
+The raw UTF-8 selector validates the entire closed corpus and both group links
+before selection. Nil names means all eligible source rows; an explicit empty
+subset means none after validation. It preserves source order, proposed status,
+owner, and reason. Invented valid recipes remain selectable; unsupported dispatch
+is an error rather than a pass. Candidate execution receipts do not rewrite the
+authored status or establish a shared SDK/profile gate.
+
+The public transport domain uses completed finite Init and startup Load, then
+sixteen ordinary calls and two genuine finite Client.Load calls on one activated
+connection. Controller lifecycle serialization is unchanged. Startup and all
+finite calls share one absolute deadline of at most ten seconds, with no renewal.
+The test clears lifecycle delegation before Spawn. Holds carry absent wire
+context under a separate finite observer. The credits recipe replaces one hold
+with eight genuinely bound StorageGet callbacks. Absolute counters include
+startup: entered19/load3/current18 terminal reservations/18432 bytes, and eight
+reverse calls only in the credits recipe. Host 17th ordinary and third lifecycle
+refusals are local prepublication ErrAdmissionFull, with no selected ID or wire;
+they are distinct from the SDK-only remote typed overflow group.
+
+Release and whole physical result/callback/custody retirement precede actual
+stdin halfclose. No Stop, input Unload, cancellation, signal, or forced cleanup
+can produce success. Natural worker and bridge exit0, cleanup1, complete input
+ownership, pure EOF and all observer/control joins are mandatory. A physical tap
+is bounded to 64 frames of 64KiB each. Late harness errors and balanced extra
+traffic remain fatal. Every intermediate physical snapshot is validated. The
+TypeScript SDK completes a returned scope by aborting its local controller; this
+non-deadline event is accepted only for the same owned ID after the callback
+return in observer ingress order. It does not stand in for a remote deadline or
+host cancellation. Historical raw ea8 forward/credits stay PENDING/incompatible;
+all broader mandatory and operational gates remain open.
