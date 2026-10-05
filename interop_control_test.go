@@ -321,6 +321,7 @@ type interopControls struct {
 	childStream          atomic.Bool
 	childOutputSequence  atomic.Uint64
 	hungProof            *interopHungProof
+	disconnectProof      *interopDisconnectProof
 	privatePlan          *interopPrivatePlan
 	privateWrites        []interopWriteWitness
 	hostCancelEvidence   map[uint64]interopHostCancelEvidence
@@ -452,7 +453,7 @@ func (c *interopControls) finish(expectedCode int) error {
 					}
 				}
 			}
-			if !errors.Is(err, io.EOF) || ((c.hungProof != nil || c.childProof != nil) && err != io.EOF) { //nolint:errorlint // A joined EOF also carries a fatal selected-case observer failure.
+			if !errors.Is(err, io.EOF) || ((c.hungProof != nil || c.childProof != nil || c.disconnectProof != nil) && err != io.EOF) { //nolint:errorlint // A joined EOF also carries a fatal selected-case observer failure.
 				return fmt.Errorf("harness terminal observer: %w", err)
 			}
 			exits, finished := 0, 0
@@ -492,6 +493,13 @@ func (c *interopControls) finish(expectedCode int) error {
 					return guardErr
 				}
 				terminalExit = 0 // Only the selected hung input was removed; lifecycle terminals are mandatory.
+			}
+			if c.disconnectProof != nil {
+				var guardErr error
+				wireEvents, guardErr = c.disconnectProof.guard(wireEvents, expectedCode)
+				if guardErr != nil {
+					return guardErr
+				}
 			}
 			if err := interopWireTerminals(wireEvents, terminalExit, c.hostCancelEvidence); err != nil {
 				return err

@@ -541,7 +541,7 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 				observations = append(observations, observation)
 				continue
 			}
-			supported := recipe.Scenario == "child-fairness" || recipe.Scenario == "hung-callback" || recipe.Scenario == "clip" || recipe.Scenario == "queue" || recipe.Scenario == "queue-frames" || recipe.Scenario == "reverse" || recipe.Scenario == "effects" || recipe.Scenario == "unknown" || recipe.Scenario == "overflow" || recipe.Scenario == "cleanup-error" || recipe.Scenario == "cleanup-panic" || recipe.Scenario == "cleanup-hung" || recipe.Scenario == "receipt-restart" || recipe.Scenario == "descendants" || recipe.Scenario == "deadline" || recipe.Scenario == "host-fairness"
+			supported := recipe.Scenario == "disconnect" || recipe.Scenario == "child-fairness" || recipe.Scenario == "hung-callback" || recipe.Scenario == "clip" || recipe.Scenario == "queue" || recipe.Scenario == "queue-frames" || recipe.Scenario == "reverse" || recipe.Scenario == "effects" || recipe.Scenario == "unknown" || recipe.Scenario == "overflow" || recipe.Scenario == "cleanup-error" || recipe.Scenario == "cleanup-panic" || recipe.Scenario == "cleanup-hung" || recipe.Scenario == "receipt-restart" || recipe.Scenario == "descendants" || recipe.Scenario == "deadline" || recipe.Scenario == "host-fairness"
 			if !supported {
 				observation["status"] = "pending"
 				observation["owner"] = "plugin-host interop adapter (slice5)"
@@ -559,6 +559,8 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 				var p *Process
 				var c *interopControls
 				switch recipe.Scenario {
+				case "disconnect":
+					p, c = replayInteropDisconnect(t, runtime, recipe, b, observation)
 				case "child-fairness":
 					p, c = replayInteropChildFairness(t, runtime, recipe, b, observation)
 				case "host-fairness":
@@ -643,7 +645,7 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 				observation["worker_command_env"] = p.spec.Env
 				observation["bridge_command"] = p.spec.Command
 				observation["bridge_args"] = p.spec.Args
-				if recipe.Scenario != "deadline" && recipe.Scenario != "host-fairness" && recipe.Scenario != "hung-callback" && recipe.Scenario != "child-fairness" {
+				if recipe.Scenario != "deadline" && recipe.Scenario != "host-fairness" && recipe.Scenario != "hung-callback" && recipe.Scenario != "child-fairness" && recipe.Scenario != "disconnect" {
 					observation["projection"] = "Actual Init+Load lifecycle and host-minted binding; command IDs follow lifecycle; authored expanded 10000ms method ceilings"
 				}
 				if recipe.Scenario == "cleanup-hung" {

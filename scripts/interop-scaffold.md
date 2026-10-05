@@ -168,3 +168,51 @@ validators, HUNG and private host fairness retain their existing behavior.
 These receipts cover this selected case only; raw forward/credit lifecycle,
 disconnect and the wider mandatory ledger remain pending. They do not establish
 full profile, SDK release, consumer or live acceptance.
+
+
+### Disconnect with an admitted pending host read
+
+The generic exact `ea8ec0d` selector now executes the authored expanded
+`disconnect-with-pending-host-read` recipe through the real Go, Node and Deno
+workers. Product setup remains genuine Init+Load with cumulative Load counters
+and finite 10000ms host-minted StorageGet authority. The source driver's Init-only
+setup and literal `binding-example` are explicitly different; neither creates
+host authority.
+
+The handler holds exactly one admitted backend read until genuine parent
+retirement/process fencing, then halfcloses actual stdin after the reverse frame
+and backend entry. It sends no Stop, Unload, caller cancellation or observer
+expiry as the trigger. It independently observes the complete actual-parent
+physical CommandResult, one helper index0 `target_unavailable`, and `returned1`.
+The required `effect_state: unknown` is the stronger published-read EOF
+classification derived from SDK source; the authored driver asserts the code.
+Worker output order comes from observer ingress, not event consumption order.
+TypeScript's completed Load scope may emit a non-deadline abort event under
+`admission.finish`/`release`; that is separately owned completion, not a wire
+cancel or the selected disconnect cause.
+
+Physical child conformance and public delivery are separate report fields.
+Either the genuine typed public result or an attributable native EOF/closed-pipe
+`ErrGone` may be recorded. The latter is **public delivery FAILED**, never Conn
+success or a synthesized result. A local error, helper event or backend logical
+reply cannot replace the physical typed child result. The actual complete error
+graph is retained; a joined harness/deadline/cancellation error is fatal.
+
+Only the one actually published, admitted StorageGet request may lack a host
+terminal. A bounded test-owned tap forwards writes unchanged and preserves the
+native pipe deadline/Close, retaining every attempted raw frame and underlying
+byte/error result. No-attempt/fenced is recorded separately from zero-byte native
+failure. ANY partial/full host reply bytes, including full bytes followed by an
+observer error, reject this no-reply contract. Complete directional input and
+terminal ownership rejects balanced extras, foreign IDs and every unauthored
+notification; shared/default terminal validators are unchanged.
+
+Actual callback return/admission permit release is joined separately from
+queue/reserved writer-credit retirement. Natural worker AND bridge exit0/reap,
+cleanup1/no input Unload, pure EOF/all reader-control-event joins, no late failure,
+and zero local custody before fallback are mandatory. Watchdog/forced cleanup
+cannot pass. Expanded retains its default five-second shutdown; HUNG's 200ms
+policy is not substituted. Constructed guard tests and copied actual-trace
+mutations remain distinct from genuine runtime executions. This bounded recipe
+never closes public-delivery robustness, raw forward/credits lifecycle gaps or
+the full security/application/hooks/SDK/release/consumer/live ledger.

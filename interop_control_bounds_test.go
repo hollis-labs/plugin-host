@@ -5,13 +5,17 @@ package pluginhost
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/hollis-labs/plugin-sdk/capability"
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 	"io"
 	"net"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -640,5 +644,193 @@ func TestInteropChildFairnessCompleteOwnershipAndRetirement(t *testing.T) {
 	c.failure <- io.EOF
 	if err := c.finish(0); err != nil {
 		t.Fatal("legal reordered trace", err)
+	}
+}
+
+// The fixture models semantic ownership, including opposite-direction ID
+// collision, without pretending these constructed events are runtime receipts.
+func disconnectGuardFixture() (*interopDisconnectProof, []map[string]json.RawMessage) {
+	now := time.Now()
+	ref := interopQueueRef{Source: "ea8ec0dca862d0c7284cc6a130a4b27fb812ed21", Manifest: "30cb07b87060dc88e9cb6ac5414f7b9cb7bb19c7a97c058e284d96e1e59ff4a9", Recipe: "disconnect-with-pending-host-read", Scenario: "disconnect", Profile: "expanded", Runtime: "go", Run: "test-owned-run", Corpus: 1, Selector: 1}
+	p := &interopDisconnectProof{Ref: ref, expected: ref, CommandID: 17, ReverseID: 17, Binding: "actual-bound-read", Lifecycle: map[string]uint64{subprocess.MethodInit: 8, subprocess.MethodLoad: 9}, BackendEntries: 1, BackendReturns: 1, BeforePermit: 1, BackendCause: "context canceled", BackendKey: "read", CommitRefusal: "refused", BackendEnteredAt: now, HalfcloseAt: now.Add(time.Millisecond), BackendReturnedAt: now.Add(2 * time.Millisecond), ParentRetired: true, SessionFenced: true, CustodyRetired: true, CancellationParentRetired: true, PublicDelivery: "SUCCEEDED", ReplyDisposition: "NO_ATTEMPT_FENCED", ControlTrace: []string{"release:request-2/ack:1"}}
+	p.Authority = HostAuthority{Method: HostStorageGet, Parent: subprocess.ParentCall{RequestOwner: subprocess.HostRPCOwnerHost, ID: p.CommandID}, BindingID: subprocess.BindingID(p.Binding), Grant: capability.Grant{GrantID: "g-StorageGet"}, Deadline: now.Add(10 * time.Second)}
+	content := `[{"code":"target_unavailable","effect_state":"unknown"}]`
+	result := map[string]any{"action": "message", "content": content}
+	p.PhysicalResult = mustInteropDisconnectJSON(result)
+	events := []map[string]json.RawMessage{
+		queueGuardEvent(map[string]any{"kind": "ready"}), queueGuardEvent(map[string]any{"kind": "init_client", "client": true}), queueGuardEvent(map[string]any{"kind": "control_received", "seq": 1}),
+		queueGuardWire("host-to-worker", "request", 8, subprocess.MethodInit, map[string]any{}, nil),
+		queueGuardWire("worker-to-host", "response", 8, "", nil, map[string]any{}),
+		queueGuardWire("host-to-worker", "request", 9, subprocess.MethodLoad, map[string]any{}, nil),
+		queueGuardEvent(map[string]any{"kind": "entered", "id": 9, "name": "load", "deadline": true}), queueGuardEvent(map[string]any{"kind": "returned", "id": 9}),
+		queueGuardWire("worker-to-host", "response", 9, "", nil, map[string]any{}),
+		queueGuardWire("host-to-worker", "request", 17, subprocess.MethodCommandExecute, map[string]any{"name": "get", "args": `{"key":"read","n":1}`, "session_id": "", "context": map[string]any{"binding_id": p.Binding, "timeout_ms": 9999}}, nil),
+		queueGuardEvent(map[string]any{"kind": "entered", "id": 17, "name": "get", "deadline": true}),
+		queueGuardWire("worker-to-host", "request", 17, string(HostStorageGet), map[string]any{"grant_id": "g-StorageGet", "key": "read", "context": map[string]any{"binding_id": p.Binding, "timeout_ms": 9998, "parent_call": p.Authority.Parent}}, nil),
+		queueGuardEvent(map[string]any{"kind": "helper_done", "id": 17, "index": 0, "failure": interopHelperOutcome{Code: "target_unavailable", EffectState: "unknown"}}),
+		queueGuardWire("worker-to-host", "response", 17, "", nil, result), queueGuardEvent(map[string]any{"kind": "returned", "id": 17}), queueGuardEvent(map[string]any{"kind": "unload_started"}),
+		queueGuardEvent(map[string]any{"kind": "finished", "effects": map[string]int{"entered": 2, "load": 1, "get": 1, "returned": 1, "unload_attempts": 1, "reverse_pending": 0}}), queueGuardEvent(map[string]any{"kind": "worker_exit", "exit_code": 0}),
+	}
+	var sequence uint64
+	for _, e := range events {
+		if rawEventString(e, "kind") != "wire" {
+			continue
+		}
+		raw := rawEventString(e, "raw")
+		e["sha256"], _ = json.Marshal(fmt.Sprintf("%x", sha256.Sum256([]byte(raw))))
+		if rawEventString(e, "direction") == "host-to-worker" {
+			p.Writes = append(p.Writes, interopDisconnectWrite{Raw: raw, Bytes: len(raw), At: now.Add(-time.Millisecond)})
+		} else {
+			sequence++
+			e["child_output_sequence"], _ = json.Marshal(sequence)
+		}
+	}
+	return p, events
+}
+
+func TestInteropDisconnectCompleteOwnership(t *testing.T) {
+	variants := []string{"canonical", "reversed-consumption", "completed-load-abort", "failed-public-native", "extra-pair", "unowned-cancel", "missing-physical-result", "wrong-helper", "missing-load", "late-error", "partial-reply", "full-reply-with-error", "unavailable-writer", "unreturned-backend", "permit-held", "credit-held", "false-public-success", "wrong-run", "foreign-parent", "wrong-deadline", "wrong-stream-order", "extra-control", "zero-attempt-unattributed", "joined-public-error", "duplicate-helper", "extra-abort", "unattributed-cause", "swapped-stream", "missing-cleanup"}
+	for _, variant := range variants {
+		t.Run(variant, func(t *testing.T) {
+			p, events := disconnectGuardFixture()
+			pure := variant == "canonical" || variant == "reversed-consumption" || variant == "completed-load-abort" || variant == "failed-public-native"
+			failure := io.EOF
+			reply := interopDisconnectWrite{Raw: string(mustInteropDisconnectJSON(map[string]any{"jsonrpc": "2.0", "id": p.ReverseID, "error": map[string]any{"code": -32010}})) + "\n", At: p.BackendReturnedAt, Error: "file already closed", ClosedPipe: true}
+			switch variant {
+			case "reversed-consumption":
+				for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
+					events[i], events[j] = events[j], events[i]
+				}
+			case "completed-load-abort":
+				events = append(events, queueGuardEvent(map[string]any{"kind": "aborted", "id": p.Lifecycle[subprocess.MethodLoad], "deadline": false}))
+			case "failed-public-native":
+				p.PublicDelivery = "FAILED"
+				p.PublicError = "plugin is gone: file already closed"
+				p.PublicTransportCause = true
+				p.ConnError = p.PublicError
+				p.Writes = append(p.Writes, reply)
+				p.ReplyDisposition = "ZERO_BYTE_NATIVE_FAILURE"
+			case "extra-pair":
+				events = append(events, queueGuardWire("host-to-worker", "request", 99, subprocess.MethodHealth, map[string]any{}, nil), queueGuardWire("worker-to-host", "response", 99, "", nil, map[string]any{"ok": true}))
+			case "unowned-cancel":
+				//nolint:misspell // Exact SDK cancellation reason.
+				raw := append(mustInteropDisconnectJSON(map[string]any{"jsonrpc": "2.0", "method": "rpc/cancel", "params": map[string]any{"request_owner": "host", "id": p.CommandID, "reason": "caller_cancelled"}}), '\n')
+				events = append(events, queueGuardEvent(map[string]any{"kind": "wire", "direction": "host-to-worker", "frame_type": "notification", "method": "rpc/cancel", "raw": string(raw), "bytes": len(raw)})) //nolint:misspell // Wire reason.
+			case "missing-physical-result":
+				for i, e := range events {
+					if rawEventString(e, "kind") == "wire" && rawEventString(e, "direction") == "worker-to-host" && rawEventString(e, "frame_type") == "response" && string(e["id"]) == "17" {
+						events = append(events[:i], events[i+1:]...)
+						break
+					}
+				}
+			case "wrong-helper":
+				for _, e := range events {
+					if rawEventString(e, "kind") == "helper_done" {
+						e["index"] = json.RawMessage(`1`)
+					}
+				}
+			case "missing-load":
+				for i, e := range events {
+					if rawEventString(e, "method") == subprocess.MethodLoad {
+						events = append(events[:i], events[i+1:]...)
+						break
+					}
+				}
+			case "late-error":
+				failure = errors.Join(io.EOF, errors.New("late observer failure"))
+			case "partial-reply":
+				reply.Bytes = 1
+				p.Writes = append(p.Writes, reply)
+				p.ReplyDisposition = "ZERO_BYTE_NATIVE_FAILURE"
+			case "full-reply-with-error":
+				reply.Bytes = len(reply.Raw)
+				p.Writes = append(p.Writes, reply)
+				p.ReplyDisposition = "ZERO_BYTE_NATIVE_FAILURE"
+			case "unavailable-writer":
+				p.WriterOverflow = true
+			case "unreturned-backend":
+				p.BackendReturns = 0
+			case "permit-held":
+				p.AfterPermit = 1
+			case "credit-held":
+				p.CustodyRetired = false
+			case "false-public-success":
+				p.PhysicalResult = nil
+			case "wrong-run":
+				p.Ref.Run = "foreign"
+			case "foreign-parent":
+				p.Authority.Parent.ID++
+			case "wrong-deadline":
+				p.BackendCause = "context deadline exceeded"
+			case "wrong-stream-order":
+				for _, e := range events {
+					if string(e["child_output_sequence"]) == "3" {
+						e["child_output_sequence"] = json.RawMessage(`4`)
+						break
+					}
+				}
+			case "extra-control":
+				events = append(events, queueGuardEvent(map[string]any{"kind": "control_received", "seq": 2}))
+			case "zero-attempt-unattributed":
+				p.PublicDelivery = "FAILED"
+				p.PublicError = "gone"
+				p.PublicTransportCause = false
+			case "joined-public-error":
+				p.PublicDelivery = "FAILED"
+				p.PublicError = "gone plus failure"
+				p.PublicTransportCause = false
+				p.ConnError = "gone"
+			case "duplicate-helper":
+				for _, e := range events {
+					if rawEventString(e, "kind") == "helper_done" {
+						events = append(events, e)
+						break
+					}
+				}
+			case "unattributed-cause":
+				p.CancellationParentRetired = false
+				p.CancellationSessionFenced = false
+			case "swapped-stream":
+				for _, e := range events {
+					if string(e["child_output_sequence"]) == "3" {
+						e["child_output_sequence"] = json.RawMessage(`4`)
+					} else if string(e["child_output_sequence"]) == "4" {
+						e["child_output_sequence"] = json.RawMessage(`3`)
+					}
+				}
+			case "missing-cleanup":
+				for _, e := range events {
+					if rawEventString(e, "kind") == "finished" {
+						var v map[string]int
+						_ = json.Unmarshal(e["effects"], &v)
+						v["unload_attempts"] = 0
+						e["effects"], _ = json.Marshal(v)
+					}
+				}
+			case "extra-abort":
+				events = append(events, queueGuardEvent(map[string]any{"kind": "aborted", "id": p.CommandID, "deadline": false}))
+			}
+			c := &interopControls{disconnectProof: p, expandedReverseLimit: 8, observed: events, events: make(chan map[string]json.RawMessage), failure: make(chan error, 1)}
+			c.failure <- failure
+			err := c.finish(0)
+			if pure && err != nil {
+				t.Fatal("legal owned disconnect refused", err)
+			}
+			if !pure && err == nil {
+				t.Fatal("unowned or incomplete disconnect accepted", variant)
+			}
+		})
+	}
+}
+
+func TestInteropDisconnectTransportErrorDoesNotMaskJoinedFailure(t *testing.T) {
+	for _, leaf := range []error{io.EOF, os.ErrClosed, syscall.EPIPE} {
+		native := fmt.Errorf("%w: %w", ErrGone, leaf)
+		if ok, _ := interopDisconnectTransportError(native); !ok {
+			t.Fatal("native transport attribution rejected", native)
+		}
+		if ok, _ := interopDisconnectTransportError(errors.Join(native, errors.New("late control failure"))); ok {
+			t.Fatal("joined harness failure hidden")
+		}
 	}
 }
