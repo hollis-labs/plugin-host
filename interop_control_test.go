@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hollis-labs/plugin-host/internal/strictjson"
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
@@ -316,26 +317,29 @@ func (w *interopEventWriter) failure() error {
 }
 
 type interopControls struct {
-	queueProof           *interopQueueProof
-	childProof           *interopChildProof
-	childStream          atomic.Bool
-	childOutputSequence  atomic.Uint64
-	hungProof            *interopHungProof
-	disconnectProof      *interopDisconnectProof
-	privatePlan          *interopPrivatePlan
-	privateWrites        []interopWriteWitness
-	hostCancelEvidence   map[uint64]interopHostCancelEvidence
-	expandedReverseLimit uint32
-	socket               net.Conn
-	events               chan map[string]json.RawMessage
-	failure              chan error
-	seq                  int
-	pending              []map[string]json.RawMessage
-	trace                []string
-	observed             []map[string]json.RawMessage
-	observedBytes        int
-	eventBytes           atomic.Int64
-	eventCount           atomic.Int64
+	lifecycleProof          *interopLifecycleProof
+	lifecycleStream         atomic.Bool
+	lifecycleStderrSequence atomic.Uint64
+	queueProof              *interopQueueProof
+	childProof              *interopChildProof
+	childStream             atomic.Bool
+	childOutputSequence     atomic.Uint64
+	hungProof               *interopHungProof
+	disconnectProof         *interopDisconnectProof
+	privatePlan             *interopPrivatePlan
+	privateWrites           []interopWriteWitness
+	hostCancelEvidence      map[uint64]interopHostCancelEvidence
+	expandedReverseLimit    uint32
+	socket                  net.Conn
+	events                  chan map[string]json.RawMessage
+	failure                 chan error
+	seq                     int
+	pending                 []map[string]json.RawMessage
+	trace                   []string
+	observed                []map[string]json.RawMessage
+	observedBytes           int
+	eventBytes              atomic.Int64
+	eventCount              atomic.Int64
 }
 
 func (c *interopControls) record(e map[string]json.RawMessage) error {
@@ -453,7 +457,7 @@ func (c *interopControls) finish(expectedCode int) error {
 					}
 				}
 			}
-			if !errors.Is(err, io.EOF) || ((c.hungProof != nil || c.childProof != nil || c.disconnectProof != nil) && err != io.EOF) { //nolint:errorlint // A joined EOF also carries a fatal selected-case observer failure.
+			if !errors.Is(err, io.EOF) || ((c.hungProof != nil || c.childProof != nil || c.disconnectProof != nil || c.lifecycleProof != nil) && err != io.EOF) { //nolint:errorlint // A joined EOF also carries a fatal selected-case observer failure.
 				return fmt.Errorf("harness terminal observer: %w", err)
 			}
 			exits, finished := 0, 0
@@ -473,6 +477,11 @@ func (c *interopControls) finish(expectedCode int) error {
 				return fmt.Errorf("harness terminal receipts exits=%d finished=%d", exits, finished)
 			}
 			wireEvents := c.observed
+			if c.lifecycleProof != nil {
+				if err := c.lifecycleProof.guard(c.observed, expectedCode); err != nil {
+					return err
+				}
+			}
 			if c.privatePlan != nil {
 				var guardErr error
 				wireEvents, guardErr = c.privatePlan.guard(c.observed, c.privateWrites)
@@ -619,6 +628,12 @@ func spawnInteropChild(t *testing.T, runtime, mode string, services HostServices
 			var v struct {
 				Event map[string]json.RawMessage `json:"fixture_event"`
 			}
+			if c.lifecycleStream.Load() {
+				if err := strictjson.Validate(raw); err != nil {
+					c.failure <- err
+					return
+				}
+			}
 			if err = json.Unmarshal(raw, &v); err != nil {
 				c.failure <- err
 				return
@@ -630,6 +645,9 @@ func spawnInteropChild(t *testing.T, runtime, mode string, services HostServices
 			}
 			if c.childStream.Load() && kind == "wire" && rawEventString(v.Event, "direction") == "worker-to-host" {
 				v.Event["child_output_sequence"], _ = json.Marshal(c.childOutputSequence.Add(1))
+			}
+			if c.lifecycleStream.Load() && kind != "wire" {
+				v.Event["lifecycle_stderr_sequence"], _ = json.Marshal(c.lifecycleStderrSequence.Add(1))
 			}
 			if err := c.enqueue(v.Event); err != nil {
 				c.failure <- err

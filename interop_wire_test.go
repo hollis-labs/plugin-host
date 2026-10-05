@@ -3,6 +3,7 @@
 package pluginhost
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,381 @@ import (
 	"github.com/hollis-labs/plugin-host/internal/strictjson"
 	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
+
+// This selected contract has no cancellation trigger. Every host request must
+// belong to the closed actual input plan, and every underlying host write must
+// have exactly one observer witness. Shared notification rules remain unchanged.
+func (p *interopLifecycleProof) guard(events []map[string]json.RawMessage, exit int) error {
+	fail := func() error { return errors.New("harness lifecycle capacity ownership/custody proof") }
+	if p == nil || p.Ref != p.expected || len(p.Ref.Source) != 40 || len(p.Ref.Manifest) != 64 || p.Ref.Run == "" || p.Ref.Corpus != 1 || p.Ref.Selector != 1 || p.Ref.Profile != "expanded" || exit != 0 || p.Overflow || !p.CustodyRetired || !p.Halfclosed || !p.LocalOrdinaryRefused || !p.LocalLifecycleRefused || len(p.Inputs) != 20 {
+		return fail()
+	}
+	if p.Ref.Runtime != "go" && p.Ref.Runtime != "node" && p.Ref.Runtime != "deno" {
+		return fail()
+	}
+	reverseCount, holds := 0, 16
+	if p.Ref.Scenario == "credits-v2" {
+		reverseCount, holds = 8, 15
+	} else if p.Ref.Scenario != "forward-v2" {
+		return fail()
+	}
+	if p.BeforeRefusal != p.AfterRefusal || p.BeforeRefusal.Ordinary != 16 || p.BeforeRefusal.Lifecycle != 2 || p.BeforeRefusal.Pending != 18 || p.BeforeRefusal.Correlations != holds || p.BeforeRefusal.Inbound != reverseCount || p.BeforeRefusal.Workers != reverseCount || p.BeforeRefusal.Reserved != 18+reverseCount || p.BackendPermitBefore != reverseCount || p.BackendPermitAfter != 0 {
+		return fail()
+	}
+	if p.AuthorityBefore.Parents != 2+reverseCount/8 || p.AuthorityBefore.LiveBindings != reverseCount/8 || p.AuthorityBefore.Active != reverseCount || p.AuthorityAfter.Parents != 0 || p.AuthorityAfter.LiveBindings != 0 || p.AuthorityAfter.Active != 0 {
+		return fail()
+	}
+	if p.Startup["entered"] != 1 || p.Startup["load"] != 1 || p.Startup["returned"] != 0 || p.Startup["reserved_frames"] != 0 || p.Startup["reserved_bytes"] != 0 || p.Startup["reverse_pending"] != 0 || p.Saturated["entered"] != 19 || p.Saturated["load"] != 3 || p.Saturated["hold"] != holds || p.Saturated["returned"] != 0 || p.Saturated["reverse_pending"] != reverseCount || p.Saturated["reserved_frames"] != 18 || p.Saturated["reserved_bytes"] != 18*1024 || p.Released["returned"] != 16 || p.Released["reserved_frames"] != 0 || p.Released["reserved_bytes"] != 0 || p.Released["reverse_pending"] != 0 || p.BackendEntries != reverseCount || p.BackendReturns != reverseCount || len(p.Authorities) != reverseCount {
+		return fail()
+	}
+	type envelope struct {
+		JSONRPC string
+		ID      uint64
+		Method  string
+		Params  json.RawMessage
+		Result  json.RawMessage
+		Error   json.RawMessage
+	}
+	if len(p.ControlTrace) > 64 {
+		return fail()
+	}
+	releaseIDs := map[uint64]bool{}
+	snapshotControls := 0
+	for index, trace := range p.ControlTrace {
+		suffix := fmt.Sprintf("/ack:%d", index+1)
+		if !strings.HasPrefix(trace, "release:") || !strings.HasSuffix(trace, suffix) {
+			return fail()
+		}
+		gate := strings.TrimSuffix(strings.TrimPrefix(trace, "release:"), suffix)
+		if gate == "snapshot" {
+			snapshotControls++
+			continue
+		}
+		var id uint64
+		if _, err := fmt.Sscanf(gate, "request-%d", &id); err != nil || gate != fmt.Sprintf("request-%d", id) || releaseIDs[id] {
+			return fail()
+		}
+		owned, ok := p.Inputs[id]
+		if !ok || (owned.Method != subprocess.MethodLoad && owned.Name != "hold") {
+			return fail()
+		}
+		releaseIDs[id] = true
+	}
+	if len(releaseIDs) != holds+3 || snapshotControls < 4 || snapshotControls > 43 {
+		return fail()
+	}
+	controlACKs := map[int]bool{}
+	snapshotEvents := 0
+	returnedSequence, completionAbort := map[uint64]uint64{}, map[uint64]uint64{}
+	for _, field := range []string{"entered", "load", "hold", "get", "returned", "reverse_pending", "reserved_frames", "reserved_bytes", "commits", "unload_attempts"} {
+		if p.Saturated[field] != p.AfterOverflow[field] {
+			return fail()
+		}
+	}
+	if p.Startup["unload_attempts"] != 0 || p.Saturated["unload_attempts"] != 0 || p.Released["unload_attempts"] != 0 || p.Startup["commits"] != 0 || p.Saturated["commits"] != 0 || p.Released["commits"] != 0 || p.Saturated["get"] != reverseCount/8 {
+		return fail()
+	}
+	writes := map[string]string{}
+	writeTimes := map[string]time.Time{}
+	for _, w := range p.Writes {
+		if w.Error != "" || w.Bytes != len(w.Raw) || w.Bytes <= 0 || w.Bytes > 64<<10 || !w.At.Before(p.Deadline) || strictjson.Validate([]byte(w.Raw)) != nil {
+			return fail()
+		}
+		hash := fmt.Sprintf("%x", sha256.Sum256([]byte(w.Raw)))
+		if _, exists := writes[hash]; exists {
+			return fail()
+		}
+		writes[hash] = w.Raw
+		writeTimes[hash] = w.At
+	}
+	inputs, terminals, entered, returned := map[uint64]bool{}, map[uint64]bool{}, map[uint64]bool{}, map[uint64]bool{}
+	reverses := map[uint64]bool{}
+	helperIndices := map[int]bool{}
+	init, load, hold, get, finished, workerExit, cleanup := 0, 0, 0, 0, 0, 0, 0
+	var lastSequence uint64
+	// Consumption order can differ from physical child order; ingress ordinals
+	// are independently unique and retained for all physical worker frames.
+	sequences := map[uint64]bool{}
+	for _, e := range events {
+		switch rawEventString(e, "kind") {
+		case "control_received":
+			var seq int
+			if json.Unmarshal(e["seq"], &seq) != nil || seq <= 0 || seq > len(p.ControlTrace) || controlACKs[seq] {
+				return fail()
+			}
+			controlACKs[seq] = true
+		case "snapshot":
+			snapshotEvents++
+			var effects map[string]int
+			if json.Unmarshal(e["effects"], &effects) != nil || effects == nil || effects["commits"] != 0 || effects["unload_attempts"] != 0 || effects["health"] != 0 || effects["put"] != 0 {
+				return fail()
+			}
+			expected := p.Released
+			if snapshotEvents == 1 {
+				expected = p.Startup
+			} else if snapshotEvents == 2 {
+				expected = p.Saturated
+			} else if snapshotEvents == 3 {
+				expected = p.AfterOverflow
+			}
+			for _, field := range []string{"entered", "load", "hold", "get", "returned"} {
+				if effects[field] != expected[field] {
+					return fail()
+				}
+			}
+			if snapshotEvents <= 3 {
+				for _, field := range []string{"reverse_pending", "reserved_frames", "reserved_bytes", "ordinary_queued", "control_queued"} {
+					if effects[field] != expected[field] {
+						return fail()
+					}
+				}
+			} else if effects["reverse_pending"] != 0 || effects["reserved_frames"] < 0 || effects["reserved_frames"] > 18 || effects["reserved_bytes"] != effects["reserved_frames"]*1024 || effects["ordinary_queued"] != 0 || effects["control_queued"] < 0 || effects["control_queued"] > 18 {
+				return fail()
+			}
+		case "wire":
+			direction, kind := rawEventString(e, "direction"), rawEventString(e, "frame_type")
+			if kind == "notification" {
+				return fail()
+			}
+			raw := rawEventString(e, "raw")
+			if direction == "host-to-worker" {
+				hash := rawEventString(e, "sha256")
+				physical, ok := writes[hash]
+				if !ok {
+					return fail()
+				}
+				delete(writes, hash)
+				if raw != "" && raw != physical {
+					return fail()
+				}
+				raw = physical
+			} else if direction == "worker-to-host" {
+				var sequence uint64
+				if json.Unmarshal(e["child_output_sequence"], &sequence) != nil || sequence == 0 || sequences[sequence] {
+					return fail()
+				}
+				sequences[sequence] = true
+				if sequence > lastSequence {
+					lastSequence = sequence
+				}
+			} else {
+				return fail()
+			}
+			var v envelope
+			if _, err := strictjson.ObjectFields([]byte(raw), []string{"jsonrpc", "id"}, []string{"method", "params", "result", "error"}); err != nil {
+				return fail()
+			}
+			if strictjson.Validate([]byte(raw)) != nil || json.Unmarshal([]byte(raw), &v) != nil || v.ID == 0 || v.JSONRPC != "2.0" {
+				return fail()
+			}
+			if direction == "host-to-worker" && kind == "request" {
+				if len(v.Result) != 0 || len(v.Error) != 0 || len(v.Params) == 0 {
+					return fail()
+				}
+				owned, ok := p.Inputs[v.ID]
+				if !ok || inputs[v.ID] || owned.ID != v.ID || v.Method != owned.Method {
+					return fail()
+				}
+				inputs[v.ID] = true
+				var params map[string]json.RawMessage
+				if json.Unmarshal(v.Params, &params) != nil {
+					return fail()
+				}
+				contextRaw, hasContext := params["context"]
+				if owned.Finite != hasContext {
+					return fail()
+				}
+				if hasContext {
+					contextFields, err := strictjson.ObjectFields(contextRaw, []string{"timeout_ms"}, []string{"binding_id"})
+					if err != nil {
+						return fail()
+					}
+					_, hasBinding := contextFields["binding_id"]
+					if hasBinding != (owned.Binding != "") {
+						return fail()
+					}
+					var context struct {
+						Timeout int64  `json:"timeout_ms"`
+						Binding string `json:"binding_id"`
+					}
+					if json.Unmarshal(contextRaw, &context) != nil || context.Timeout <= 0 || context.Timeout > 10000 || context.Binding != owned.Binding || context.Timeout > p.Deadline.Sub(writeTimes[rawEventString(e, "sha256")]).Milliseconds()+1 {
+						return fail()
+					}
+				}
+				delete(params, "context")
+				actualParams, marshalErr := json.Marshal(params)
+				if marshalErr != nil {
+					return fail()
+				}
+				expectedParams := json.RawMessage(`{}`)
+				if owned.Method == subprocess.MethodInit {
+					expectedParams = p.InitParams
+				} else if owned.Method == subprocess.MethodCommandExecute {
+					expectedParams, _ = json.Marshal(subprocess.CommandExecParams{Name: owned.Name, Args: owned.Args})
+				}
+				var expectedFields map[string]json.RawMessage
+				if json.Unmarshal(expectedParams, &expectedFields) != nil || expectedFields == nil {
+					return fail()
+				}
+				delete(expectedFields, "context")
+				expectedParams, marshalErr = json.Marshal(expectedFields)
+				if marshalErr != nil || !bytes.Equal(actualParams, expectedParams) {
+					return fail()
+				}
+				switch owned.Method {
+				case subprocess.MethodInit:
+					init++
+				case subprocess.MethodLoad:
+					load++
+				case subprocess.MethodCommandExecute:
+					var command struct{ Name, Args string }
+					if json.Unmarshal(v.Params, &command) != nil || command.Name != owned.Name || command.Args != owned.Args {
+						return fail()
+					}
+					if owned.Name == "hold" {
+						hold++
+					} else if owned.Name == "get" && reverseCount == 8 && owned.Binding != "" {
+						get++
+					} else {
+						return fail()
+					}
+				default:
+					return fail()
+				}
+				if owned.Method != subprocess.MethodInit && (!owned.Credit.WholeInput || !owned.Credit.LocalOK || !owned.Credit.Released || !owned.Credit.CreditRetired || owned.Credit.ID != v.ID) {
+					return fail()
+				}
+			} else if direction == "worker-to-host" && kind == "response" {
+				owned, ok := p.Inputs[v.ID]
+				if !ok || terminals[v.ID] || len(v.Result) == 0 || len(v.Error) != 0 || v.Method != "" || len(v.Params) != 0 {
+					return fail()
+				}
+				if owned.Method == subprocess.MethodInit {
+					result, err := decodeInitResult(v.Result)
+					if err != nil || result.ID != "fixture" || result.Version != "1.0.0" || result.Protocol != 2 || result.CapabilityContract != 1 || result.ReverseRPCVersion == nil || *result.ReverseRPCVersion != 1 {
+						return fail()
+					}
+				} else if validatePendingResult(owned.Method, v.Result) != nil {
+					return fail()
+				}
+				if owned.Method == subprocess.MethodCommandExecute {
+					var result subprocess.CommandExecResult
+					if json.Unmarshal(v.Result, &result) != nil {
+						return fail()
+					}
+					if owned.Name == "hold" && result.Action != "noop" {
+						return fail()
+					}
+					if owned.Name == "get" {
+						var outcomes []interopHelperOutcome
+						if result.Action != "message" || json.Unmarshal([]byte(result.Content), &outcomes) != nil || len(outcomes) != 8 {
+							return fail()
+						}
+						for _, outcome := range outcomes {
+							if outcome.Code != "ok" {
+								return fail()
+							}
+						}
+					}
+				}
+				terminals[v.ID] = true
+			} else if direction == "worker-to-host" && kind == "request" {
+				if reverseCount == 0 || v.Method != string(HostStorageGet) || reverses[v.ID] {
+					return fail()
+				}
+				reverses[v.ID] = true
+			} else if direction == "host-to-worker" && kind == "response" {
+				var result subprocess.StorageGetResult
+				if reverseCount == 0 || len(v.Result) == 0 || len(v.Error) != 0 || validatePendingResult(string(HostStorageGet), v.Result) != nil || json.Unmarshal(v.Result, &result) != nil || result.Found {
+					return fail()
+				}
+			} else {
+				return fail()
+			}
+		case "entered", "returned":
+			var id uint64
+			if json.Unmarshal(e["id"], &id) != nil {
+				return fail()
+			}
+			owned, ok := p.Inputs[id]
+			if !ok || owned.Method == subprocess.MethodInit {
+				return fail()
+			}
+			if rawEventString(e, "kind") == "entered" {
+				var deadline bool
+				if entered[id] || json.Unmarshal(e["deadline"], &deadline) != nil || deadline != owned.Finite {
+					return fail()
+				}
+				want := owned.Name
+				if owned.Method == subprocess.MethodLoad {
+					want = "load"
+				}
+				if rawEventString(e, "name") != want {
+					return fail()
+				}
+				entered[id] = true
+			} else {
+				if returned[id] {
+					return fail()
+				}
+				returned[id] = true
+				var sequence uint64
+				if json.Unmarshal(e["lifecycle_stderr_sequence"], &sequence) != nil || sequence == 0 {
+					return fail()
+				}
+				returnedSequence[id] = sequence
+			}
+		case "helper_done":
+			var id uint64
+			var index int
+			var outcome interopHelperOutcome
+			if json.Unmarshal(e["id"], &id) != nil || p.Inputs[id].Name != "get" || json.Unmarshal(e["index"], &index) != nil || index < 0 || index >= 8 || helperIndices[index] || json.Unmarshal(e["failure"], &outcome) != nil || outcome.Code != "ok" {
+				return fail()
+			}
+			helperIndices[index] = true
+		case "aborted":
+			var id, sequence uint64
+			var deadline bool
+			if p.Ref.Runtime == "go" || json.Unmarshal(e["id"], &id) != nil || json.Unmarshal(e["deadline"], &deadline) != nil || deadline || json.Unmarshal(e["lifecycle_stderr_sequence"], &sequence) != nil || sequence == 0 || completionAbort[id] != 0 {
+				return fail()
+			}
+			if _, ok := p.Inputs[id]; !ok || p.Inputs[id].Method == subprocess.MethodInit {
+				return fail()
+			}
+			completionAbort[id] = sequence
+		case "control_failure":
+			return fail()
+		case "unload_started":
+			cleanup++
+		case "finished":
+			finished++
+			var effects map[string]int
+			if json.Unmarshal(e["effects"], &effects) != nil || effects["returned"] != 16 || effects["entered"] != 19 || effects["load"] != 3 || effects["unload_attempts"] != 1 || effects["commits"] != 0 || effects["reverse_pending"] != 0 || effects["reserved_frames"] != 0 || effects["reserved_bytes"] != 0 {
+				return fail()
+			}
+		case "worker_exit":
+			workerExit++
+		}
+	}
+	if len(writes) != 0 || len(inputs) != 20 || len(terminals) != 20 || len(entered) != 19 || len(returned) != 19 || init != 1 || load != 3 || hold != holds || get != reverseCount/8 || len(reverses) != reverseCount || len(helperIndices) != reverseCount || finished != 1 || workerExit != 1 || cleanup != 1 || uint64(len(sequences)) != lastSequence || len(controlACKs) != len(p.ControlTrace) || snapshotEvents != snapshotControls {
+		return fail()
+	}
+	for _, a := range p.Authorities {
+		owned, ok := p.Inputs[a.Parent.ID]
+		if !ok || owned.Name != "get" || string(a.BindingID) != owned.Binding || a.Grant.GrantID != "g-StorageGet" || a.Method != HostStorageGet || a.Deadline.IsZero() || a.Deadline.After(p.Deadline) || a.Parent.RequestOwner != subprocess.HostRPCOwnerHost {
+			return fail()
+		}
+	}
+	if p.Ref.Runtime != "go" && len(completionAbort) != 19 {
+		return fail()
+	}
+	for id, sequence := range completionAbort {
+		if returnedSequence[id] == 0 || sequence <= returnedSequence[id] {
+			return fail()
+		}
+	}
+	return nil
+}
 
 // The observer forwards every worker stdout byte unchanged. It records bounded
 // frame witnesses separately, never emits protocol messages or returns replies.

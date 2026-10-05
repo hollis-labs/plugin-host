@@ -20,6 +20,162 @@ import (
 	"time"
 )
 
+func lifecycleGuardExample() (*interopLifecycleProof, []map[string]json.RawMessage) {
+	ref := interopQueueRef{Source: strings.Repeat("a", 40), Manifest: strings.Repeat("b", 64), Recipe: "authored-example", Scenario: "forward-v2", Profile: "expanded", Runtime: "go", Run: "owned-run", Corpus: 1, Selector: 1}
+	p := &interopLifecycleProof{Ref: ref, expected: ref, Deadline: time.Now().Add(time.Second), Inputs: map[uint64]interopLifecycleInput{}, Startup: map[string]int{"entered": 1, "load": 1}, Saturated: map[string]int{"entered": 19, "load": 3, "hold": 16, "reserved_frames": 18, "reserved_bytes": 18432}, Released: map[string]int{"returned": 16}, LocalOrdinaryRefused: true, LocalLifecycleRefused: true, CustodyRetired: true, Halfclosed: true}
+	p.BeforeRefusal = interopLifecycleLocal{NextID: 20, Ordinary: 16, Lifecycle: 2, Pending: 18, Correlations: 16, Reserved: 18, PhysicalWrites: 20}
+	p.AfterOverflow = map[string]int{"entered": 19, "load": 3, "hold": 16, "reserved_frames": 18, "reserved_bytes": 18432}
+	p.InitParams = json.RawMessage(`{}`)
+	p.AuthorityBefore = interopLifecycleAuthority{Parents: 2}
+	p.AfterRefusal = p.BeforeRefusal
+	var events []map[string]json.RawMessage
+	for id := uint64(1); id <= 20; id++ {
+		method, name, finite := subprocess.MethodCommandExecute, "hold", false
+		if id == 1 {
+			method, name, finite = subprocess.MethodInit, "", true
+		} else if id == 2 || id >= 19 {
+			method, name, finite = subprocess.MethodLoad, "", true
+		}
+		params := map[string]any{}
+		if method == subprocess.MethodCommandExecute {
+			params["name"] = "hold"
+			params["args"] = "{}"
+			params["session_id"] = ""
+		}
+		if finite {
+			params["context"] = map[string]any{"timeout_ms": 500}
+		}
+		input := queueGuardWire("host-to-worker", "request", id, method, params, nil)
+		raw := rawEventString(input, "raw")
+		input["sha256"], _ = json.Marshal(fmt.Sprintf("%x", sha256.Sum256([]byte(raw))))
+		p.Writes = append(p.Writes, interopDisconnectWrite{Raw: raw, Bytes: len(raw), At: time.Now()})
+		p.Inputs[id] = interopLifecycleInput{ID: id, Method: method, Name: name, Args: "{}", Finite: finite, Credit: interopChildCredit{ID: id, InputBytes: len(raw), WholeInput: true, LocalOK: true, Released: true, CreditRetired: true}}
+		result := map[string]any{}
+		if method == subprocess.MethodCommandExecute {
+			result = map[string]any{"action": "noop"}
+		}
+		if method == subprocess.MethodInit {
+			result = map[string]any{"id": "fixture", "name": "Fixture", "version": "1.0.0", "description": "conformance", "protocol": 2, "capability_contract": 1, "reverse_rpc_version": 1}
+		}
+		terminal := queueGuardWire("worker-to-host", "response", id, "", nil, result)
+		terminal["child_output_sequence"], _ = json.Marshal(id)
+		events = append(events, input, terminal)
+		if id != 1 {
+			seq := len(p.ControlTrace) + 1
+			p.ControlTrace = append(p.ControlTrace, fmt.Sprintf("release:request-%d/ack:%d", id, seq))
+			events = append(events, queueGuardEvent(map[string]any{"kind": "control_received", "seq": seq}))
+			enteredName := name
+			if method == subprocess.MethodLoad {
+				enteredName = "load"
+			}
+			events = append(events, queueGuardEvent(map[string]any{"kind": "entered", "id": id, "name": enteredName, "deadline": finite}), queueGuardEvent(map[string]any{"kind": "returned", "id": id, "lifecycle_stderr_sequence": id}))
+		}
+	}
+	for _, effects := range []map[string]int{p.Startup, p.Saturated, p.AfterOverflow, p.Released} {
+		seq := len(p.ControlTrace) + 1
+		p.ControlTrace = append(p.ControlTrace, fmt.Sprintf("release:snapshot/ack:%d", seq))
+		events = append(events, queueGuardEvent(map[string]any{"kind": "control_received", "seq": seq}), queueGuardEvent(map[string]any{"kind": "snapshot", "effects": effects}))
+	}
+	events = append(events, queueGuardEvent(map[string]any{"kind": "unload_started"}), queueGuardEvent(map[string]any{"kind": "finished", "effects": map[string]int{"entered": 19, "load": 3, "returned": 16, "unload_attempts": 1}}), queueGuardEvent(map[string]any{"kind": "worker_exit", "exit_code": 0}))
+	return p, events
+}
+
+func TestInteropLifecycleCompletionIngress(t *testing.T) {
+	for _, runtime := range []string{"node", "deno"} {
+		for _, variant := range []string{"owned", "early", "deadline", "foreign", "duplicate", "intermediate-snapshot"} {
+			t.Run(runtime+"/"+variant, func(t *testing.T) {
+				p, events := lifecycleGuardExample()
+				p.Ref.Runtime, p.expected.Runtime = runtime, runtime
+				for id := uint64(2); id <= 20; id++ {
+					e := queueGuardEvent(map[string]any{"kind": "aborted", "id": id, "deadline": false, "lifecycle_stderr_sequence": id + 100})
+					if id == 3 {
+						switch variant {
+						case "early":
+							e["lifecycle_stderr_sequence"] = json.RawMessage(`2`)
+						case "deadline":
+							e["deadline"] = json.RawMessage(`true`)
+						case "foreign":
+							e["id"] = json.RawMessage(`999`)
+						case "duplicate":
+							events = append(events, e)
+						}
+					}
+					events = append(events, e)
+				}
+				if variant == "intermediate-snapshot" {
+					for _, e := range events {
+						if rawEventString(e, "kind") == "snapshot" {
+							var effects map[string]int
+							_ = json.Unmarshal(e["effects"], &effects)
+							effects["commits"] = 1
+							e["effects"], _ = json.Marshal(effects)
+							break
+						}
+					}
+				}
+				err := p.guard(events, 0)
+				if variant == "owned" && err != nil {
+					t.Fatal("owned source completion refused", err)
+				}
+				if variant != "owned" && err == nil {
+					t.Fatal("unowned completion or intermediate effect accepted")
+				}
+			})
+		}
+	}
+}
+
+func TestInteropLifecycleCapacityOwnership(t *testing.T) {
+	p, events := lifecycleGuardExample()
+	if err := p.guard(events, 0); err != nil {
+		t.Fatal("canonical owned inventory", err)
+	}
+	for _, variant := range []string{"extra-pair", "extra-cancel", "missing-terminal", "wrong-deadline", "credit-held", "partial-write", "foreign-run", "counter-reset", "extra-helper", "duplicate-entered", "late-control"} {
+		t.Run(variant, func(t *testing.T) {
+			p, events := lifecycleGuardExample()
+			switch variant {
+			case "extra-pair":
+				events = append(events, queueGuardWire("host-to-worker", "request", 99, subprocess.MethodHealth, map[string]any{}, nil), queueGuardWire("worker-to-host", "response", 99, "", nil, map[string]any{"ok": true}))
+			case "extra-cancel":
+				events = append(events, queueGuardWire("host-to-worker", "notification", 0, "rpc/cancel", map[string]any{"id": 3, "reason": "caller_cancelled"}, nil))
+			case "missing-terminal":
+				events = append(events[:1], events[2:]...)
+			case "wrong-deadline":
+				for _, e := range events {
+					if rawEventString(e, "kind") == "entered" {
+						e["deadline"] = json.RawMessage(`false`)
+						break
+					}
+				}
+			case "credit-held":
+				v := p.Inputs[3]
+				v.Credit.CreditRetired = false
+				p.Inputs[3] = v
+			case "partial-write":
+				p.Writes[0].Bytes--
+			case "foreign-run":
+				p.Ref.Run = "foreign"
+			case "counter-reset":
+				p.Saturated["entered"] = 18
+			case "extra-helper":
+				events = append(events, queueGuardEvent(map[string]any{"kind": "helper_done", "id": 3, "index": 0, "failure": map[string]any{"code": "ok"}}))
+			case "duplicate-entered":
+				for _, event := range events {
+					if rawEventString(event, "kind") == "entered" {
+						events = append(events, event)
+						break
+					}
+				}
+			case "late-control":
+				events = append(events, queueGuardEvent(map[string]any{"kind": "control_failure"}))
+			}
+			if err := p.guard(events, 0); err == nil {
+				t.Fatal("accepted unowned/incomplete capacity receipt")
+			}
+		})
+	}
+}
+
 func TestInteropObserverBoundsAndTerminalEventBeforeEOF(t *testing.T) {
 	w := &interopEventWriter{events: make(chan []byte, 32), diagnostics: io.Discard}
 	if _, err := w.Write(bytes.Repeat([]byte("x"), interopEventLimit+1)); err == nil {
