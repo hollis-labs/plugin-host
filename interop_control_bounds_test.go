@@ -509,3 +509,55 @@ func TestInteropQueueRejectsUnownedInputsAtEOF(t *testing.T) {
 		}
 	}
 }
+
+func TestInteropHungRequiresOwnedEOFAndNaturalExit(t *testing.T) {
+	ref := interopQueueRef{Source: "ea8ec0dca862d0c7284cc6a130a4b27fb812ed21", Manifest: "30cb07b87060dc88e9cb6ac5414f7b9cb7bb19c7a97c058e284d96e1e59ff4a9", Recipe: "hung-callback", Scenario: "hung-callback", Profile: "expanded-hung", Runtime: "go", Run: "owned-run", Corpus: 1, Selector: 1}
+	makeProof := func() *interopHungProof {
+		return &interopHungProof{Ref: ref, expected: ref, CommandID: 73, HalfClosed: true, LocalCompleted: true, CustodyRetired: true}
+	}
+	canonical := []map[string]json.RawMessage{
+		queueGuardWire("host-to-worker", "request", 61, "plugin/init", map[string]any{}, nil), queueGuardWire("worker-to-host", "response", 61, "", nil, map[string]any{}),
+		queueGuardWire("host-to-worker", "request", 62, "plugin/load", map[string]any{}, nil), queueGuardWire("worker-to-host", "response", 62, "", nil, map[string]any{}),
+		queueGuardWire("host-to-worker", "request", 73, "command/execute", map[string]any{"name": "hung", "args": "{}", "session_id": ""}, nil),
+		queueGuardEvent(map[string]any{"kind": "entered", "id": 73, "name": "hung", "deadline": false}),
+		queueGuardEvent(map[string]any{"kind": "finished", "effects": map[string]int{"entered": 2, "load": 1, "hung": 1}, "transport_error": "shutdown drain failed"}),
+		queueGuardEvent(map[string]any{"kind": "worker_exit", "exit_code": 1}),
+	}
+	for _, name := range []string{"canonical", "missing-load", "extra-pair", "notification", "fabricated-terminal", "returned", "deadline", "foreign-ref", "unretired", "unload", "wrong-exit", "late-error"} {
+		t.Run(name, func(t *testing.T) {
+			p := makeProof()
+			e := append([]map[string]json.RawMessage{}, canonical...)
+			failure := io.EOF
+			switch name {
+			case "missing-load":
+				e = append(e[:3], e[4:]...)
+			case "extra-pair":
+				e = append(e, queueGuardWire("host-to-worker", "request", 99, "plugin/health", map[string]any{}, nil), queueGuardWire("worker-to-host", "response", 99, "", nil, map[string]any{"ok": true}))
+			case "notification":
+				e = append(e, queueGuardEvent(map[string]any{"kind": "wire", "direction": "host-to-worker", "frame_type": "notification", "method": "rpc/cancel"}))
+			case "fabricated-terminal":
+				e = append(e, queueGuardWire("worker-to-host", "response", 73, "", nil, map[string]any{}))
+			case "returned":
+				e = append(e, queueGuardEvent(map[string]any{"kind": "returned", "id": 73}))
+			case "deadline":
+				e[5] = queueGuardEvent(map[string]any{"kind": "entered", "id": 73, "name": "hung", "deadline": true})
+			case "foreign-ref":
+				p.Ref.Run = "foreign"
+			case "unretired":
+				p.CustodyRetired = false
+			case "unload":
+				e[6] = queueGuardEvent(map[string]any{"kind": "finished", "effects": map[string]int{"unload_attempts": 1}, "transport_error": "failed"})
+			case "wrong-exit":
+				e[7] = queueGuardEvent(map[string]any{"kind": "worker_exit", "exit_code": 0})
+			case "late-error":
+				failure = errors.Join(io.EOF, errors.New("late control failure"))
+			}
+			c := &interopControls{hungProof: p, observed: e, events: make(chan map[string]json.RawMessage), failure: make(chan error, 1)}
+			c.failure <- failure
+			err := c.finish(1)
+			if (err == nil) != (name == "canonical") {
+				t.Fatalf("owned hung EOF %s: %v", name, err)
+			}
+		})
+	}
+}

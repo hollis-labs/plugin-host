@@ -131,3 +131,18 @@ control/observer EOF, once cleanup and natural worker/bridge exit remain strict.
 Adversarial trace copies are guard evidence, not additional runtime passes.
 Actual reports determine results; forward/credits remain incompatible and all
 other mandatory families and operational/release boundaries remain open.
+
+**Hung callback boundary:** the selected authored `hung-callback` row keeps
+genuine Init/Load and invokes an actual correlation-only `hung` command with
+absent wire context and a separate finite 2s observer. After actual-ID entered
+evidence with deadline=false, the owned Process stdin is half-closed; Stop,
+Unload and whole-Conn close are not the trigger. The SDK 200ms drain must end
+in natural worker and bridge code1/no signal, zero Unload attempts, no returned
+command/helper/backend effects, local call/credit retirement and complete
+observer EOF before fallback cleanup. The scoped input proof requires physical
+Init/Load terminals and allows only this owned hung command to lack a terminal.
+Extra balanced inputs, notifications, partial frames and late joined EOF/control
+errors fail; shared cancellation and other scenario guards remain unchanged.
+Actual SDK final reserved-frame snapshots are retained as observed and are not
+projected into product Conn credit counters. This closes no other remaining
+family or full mandatory/application/security/SDK/operational obligation.
