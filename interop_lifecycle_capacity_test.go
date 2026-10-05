@@ -248,7 +248,7 @@ func TestSDKLifecycleCompatiblePublicReplay(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = os.WriteFile(path, append(body, '\n'), 0600); err != nil {
+		if err = os.WriteFile(path, append(body, '\n'), 0600); err != nil { //nolint:gosec // Explicit test-owned report path.
 			t.Fatal(err)
 		} //nolint:gosec // Explicit test-owned report.
 	}
@@ -527,7 +527,7 @@ func replayInteropLifecycle(t *testing.T, runtime string, recipe interopRecipeRo
 	if err := c.finish(0); err != nil {
 		if root := os.Getenv("INTEROP_LIFECYCLE_FAILURE_DIR"); root != "" {
 			body, _ := json.MarshalIndent(map[string]any{"proof": proof, "events": c.observed, "failure": err.Error(), "exit": exit}, "", "  ")
-			if writeErr := os.WriteFile(filepath.Join(root, recipe.Scenario+"-"+runtime+"-failure.json"), append(body, '\n'), 0600); writeErr != nil {
+			if writeErr := os.WriteFile(filepath.Join(root, recipe.Scenario+"-"+runtime+"-failure.json"), append(body, '\n'), 0600); writeErr != nil { //nolint:gosec // Explicit test-owned failure evidence.
 				t.Error(writeErr)
 			} //nolint:gosec // Explicit test-owned failure evidence.
 		}

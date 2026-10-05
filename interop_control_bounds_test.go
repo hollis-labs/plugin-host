@@ -137,7 +137,7 @@ func TestInteropLifecycleCapacityOwnership(t *testing.T) {
 			case "extra-pair":
 				events = append(events, queueGuardWire("host-to-worker", "request", 99, subprocess.MethodHealth, map[string]any{}, nil), queueGuardWire("worker-to-host", "response", 99, "", nil, map[string]any{"ok": true}))
 			case "extra-cancel":
-				events = append(events, queueGuardWire("host-to-worker", "notification", 0, "rpc/cancel", map[string]any{"id": 3, "reason": "caller_cancelled"}, nil))
+				events = append(events, queueGuardWire("host-to-worker", "notification", 0, "rpc/cancel", map[string]any{"id": 3, "reason": "caller_cancelled"}, nil)) //nolint:misspell // Protocol reason.
 			case "missing-terminal":
 				events = append(events[:1], events[2:]...)
 			case "wrong-deadline":

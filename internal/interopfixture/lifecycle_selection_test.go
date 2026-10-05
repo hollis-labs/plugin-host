@@ -15,7 +15,7 @@ func TestLifecycleSelectionPreservesSourceAndSubset(t *testing.T) {
 		t.Fatalf("selection: %v %s", err, rows)
 	}
 	var first map[string]string
-	if err := json.Unmarshal(rows[0], &first); err != nil {
+	if err = json.Unmarshal(rows[0], &first); err != nil {
 		t.Fatal(err)
 	}
 	if first["name"] != "invented-first" || first["status"] != "proposed" || first["owner"] != " owner π " || first["reason"] != " reason " {

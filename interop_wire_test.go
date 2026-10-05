@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -22,7 +23,10 @@ import (
 // belong to the closed actual input plan, and every underlying host write must
 // have exactly one observer witness. Shared notification rules remain unchanged.
 func (p *interopLifecycleProof) guard(events []map[string]json.RawMessage, exit int) error {
-	fail := func() error { return errors.New("harness lifecycle capacity ownership/custody proof") }
+	fail := func() error {
+		_, _, line, _ := runtime.Caller(1)
+		return fmt.Errorf("harness lifecycle capacity ownership/custody proof at line %d", line)
+	}
 	if p == nil || p.Ref != p.expected || len(p.Ref.Source) != 40 || len(p.Ref.Manifest) != 64 || p.Ref.Run == "" || p.Ref.Corpus != 1 || p.Ref.Selector != 1 || p.Ref.Profile != "expanded" || exit != 0 || p.Overflow || !p.CustodyRetired || !p.Halfclosed || !p.LocalOrdinaryRefused || !p.LocalLifecycleRefused || len(p.Inputs) != 20 {
 		return fail()
 	}
@@ -127,11 +131,12 @@ func (p *interopLifecycleProof) guard(events []map[string]json.RawMessage, exit 
 				return fail()
 			}
 			expected := p.Released
-			if snapshotEvents == 1 {
+			switch snapshotEvents {
+			case 1:
 				expected = p.Startup
-			} else if snapshotEvents == 2 {
+			case 2:
 				expected = p.Saturated
-			} else if snapshotEvents == 3 {
+			case 3:
 				expected = p.AfterOverflow
 			}
 			for _, field := range []string{"entered", "load", "hold", "get", "returned"} {
@@ -154,7 +159,8 @@ func (p *interopLifecycleProof) guard(events []map[string]json.RawMessage, exit 
 				return fail()
 			}
 			raw := rawEventString(e, "raw")
-			if direction == "host-to-worker" {
+			switch direction {
+			case "host-to-worker":
 				hash := rawEventString(e, "sha256")
 				physical, ok := writes[hash]
 				if !ok {
@@ -165,7 +171,7 @@ func (p *interopLifecycleProof) guard(events []map[string]json.RawMessage, exit 
 					return fail()
 				}
 				raw = physical
-			} else if direction == "worker-to-host" {
+			case "worker-to-host":
 				var sequence uint64
 				if json.Unmarshal(e["child_output_sequence"], &sequence) != nil || sequence == 0 || sequences[sequence] {
 					return fail()
@@ -174,7 +180,7 @@ func (p *interopLifecycleProof) guard(events []map[string]json.RawMessage, exit 
 				if sequence > lastSequence {
 					lastSequence = sequence
 				}
-			} else {
+			default:
 				return fail()
 			}
 			var v envelope
@@ -224,9 +230,10 @@ func (p *interopLifecycleProof) guard(events []map[string]json.RawMessage, exit 
 					return fail()
 				}
 				expectedParams := json.RawMessage(`{}`)
-				if owned.Method == subprocess.MethodInit {
+				switch owned.Method {
+				case subprocess.MethodInit:
 					expectedParams = p.InitParams
-				} else if owned.Method == subprocess.MethodCommandExecute {
+				case subprocess.MethodCommandExecute:
 					expectedParams, _ = json.Marshal(subprocess.CommandExecParams{Name: owned.Name, Args: owned.Args})
 				}
 				var expectedFields map[string]json.RawMessage

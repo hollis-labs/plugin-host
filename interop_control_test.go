@@ -629,7 +629,7 @@ func spawnInteropChild(t *testing.T, runtime, mode string, services HostServices
 				Event map[string]json.RawMessage `json:"fixture_event"`
 			}
 			if c.lifecycleStream.Load() {
-				if err := strictjson.Validate(raw); err != nil {
+				if err = strictjson.Validate(raw); err != nil {
 					c.failure <- err
 					return
 				}
