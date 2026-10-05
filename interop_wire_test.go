@@ -1415,7 +1415,7 @@ func lifecyclePhysicalCounters(raw json.RawMessage, holds, gets int, cleaned boo
 			return nil, fmt.Errorf("missing physical counter %s", key)
 		}
 	}
-	limits := map[string]uint64{"entered": 19, "load": 3, "hold": uint64(holds), "get": uint64(gets), "returned": 16, "unload_attempts": 1, "reverse_pending": uint64(gets * 8), "ordinary_queued": 21, "control_queued": 21, "reserved_frames": 18, "reserved_bytes": 18432, "commits": 0, "health": 0, "put": 0}
+	limits := map[string]int{"entered": 19, "load": 3, "hold": holds, "get": gets, "returned": 16, "unload_attempts": 1, "reverse_pending": gets * 8, "ordinary_queued": 21, "control_queued": 21, "reserved_frames": 18, "reserved_bytes": 18432, "commits": 0, "health": 0, "put": 0}
 	counters := make(map[string]int, len(fields))
 	for key, value := range fields {
 		var n uint64
@@ -1423,10 +1423,14 @@ func lifecyclePhysicalCounters(raw json.RawMessage, holds, gets int, cleaned boo
 			return nil, fmt.Errorf("invalid physical counter %s", key)
 		}
 		// An unauthored counter may only report zero; it cannot hide an effect.
-		if n > limits[key] {
+		if n > 18432 {
+			return nil, fmt.Errorf("physical counter exceeds maximum domain %s", key)
+		}
+		count := int(n) // The explicit bound above fits every supported Go int.
+		if count > limits[key] {
 			return nil, fmt.Errorf("physical counter exceeds domain %s", key)
 		}
-		counters[key] = int(n) // Domain bounds above fit every supported Go int.
+		counters[key] = count
 	}
 	for _, key := range []string{"entered", "load", "hold", "get", "returned"} {
 		if counters[key] < previous[key] {
