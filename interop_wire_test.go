@@ -375,7 +375,7 @@ func (p *interopLifecycleProof) guard(events []map[string]json.RawMessage, exit 
 		case "finished":
 			finished++
 			effects, err := lifecyclePhysicalCounters(e["effects"], holds, reverseCount/8, true, previousCounters)
-			if err != nil || effects["returned"] != 16 || effects["entered"] != 19 || effects["load"] != 3 || effects["unload_attempts"] != 1 || effects["commits"] != 0 || effects["reverse_pending"] != 0 || effects["reserved_frames"] != 0 || effects["reserved_bytes"] != 0 {
+			if err != nil || effects["returned"] != 16 || effects["entered"] != 19 || effects["load"] != 3 || effects["unload_attempts"] != 1 || effects["commits"] != 0 || effects["reverse_pending"] != 0 || effects["reserved_frames"] != 0 || effects["reserved_bytes"] != 0 || effects["ordinary_queued"] != 0 || effects["control_queued"] != 0 {
 				return fail()
 			}
 		case "worker_exit":

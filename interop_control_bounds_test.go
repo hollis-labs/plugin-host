@@ -1104,3 +1104,33 @@ func TestInteropLifecycleMovingPhysicalCustody(t *testing.T) {
 		previous = next
 	}
 }
+
+func TestInteropLifecycleFinishedQueuesRetired(t *testing.T) {
+	for _, variant := range []string{"canonical", "ordinary_queued", "control_queued"} {
+		t.Run(variant, func(t *testing.T) {
+			p, events := lifecycleGuardExample()
+			if variant != "canonical" {
+				for _, event := range events {
+					if rawEventString(event, "kind") != "finished" {
+						continue
+					}
+					var effects map[string]json.RawMessage
+					if err := json.Unmarshal(event["effects"], &effects); err != nil {
+						t.Fatal(err)
+					}
+					effects[variant] = json.RawMessage(`1`)
+					event["effects"], _ = json.Marshal(effects)
+					break
+				}
+			}
+			err := p.guard(events, 0)
+			if variant == "canonical" {
+				if err != nil {
+					t.Fatal("retired final queues refused", err)
+				}
+			} else if err == nil {
+				t.Fatal("finished evidence retained a queued frame")
+			}
+		})
+	}
+}
