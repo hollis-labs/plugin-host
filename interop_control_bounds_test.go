@@ -13,6 +13,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestInteropObserverBoundsAndTerminalEventBeforeEOF(t *testing.T) {
@@ -559,5 +560,85 @@ func TestInteropHungRequiresOwnedEOFAndNaturalExit(t *testing.T) {
 				t.Fatalf("owned hung EOF %s: %v", name, err)
 			}
 		})
+	}
+}
+
+func childGuardFixture() (*interopChildProof, []map[string]json.RawMessage) {
+	ref := interopQueueRef{Source: "ea8ec0dca862d0c7284cc6a130a4b27fb812ed21", Manifest: "30cb07b87060dc88e9cb6ac5414f7b9cb7bb19c7a97c058e284d96e1e59ff4a9", Recipe: "child-writer-four-frame-fairness", Scenario: "child-fairness", Profile: "expanded", Runtime: "go", Run: "owned-semantic-test", Corpus: 1, Selector: 1}
+	p := &interopChildProof{Ref: ref, expected: ref, CommandID: 73, BarrierID: 17, Health: map[uint64]interopChildCredit{}, Binding: "host-binding", Args: `{"key":"read","n":8}`, SnapshotOrdinary: map[string]int{"ordinary_queued": 8}, SnapshotControl: map[string]int{"control_queued": 12, "reserved_frames": 9, "reserved_bytes": 9216}, ArmSequence: 2, ReleaseSequence: 5, Occupancy: []interopChildOccupancy{{Ordinary: 14, Credits: 14}, {Reverse: 8, Credits: 8}}, EOF: true, CustodyRetired: true, Lifecycle: map[string]uint64{subprocess.MethodInit: 1, subprocess.MethodLoad: 2}}
+	p.ControlTrace = []string{"release:request-2/ack:1", "release:arm-writer/ack:2", "release:snapshot/ack:3", "release:snapshot/ack:4", "release:writer/ack:5"}
+	events := []map[string]json.RawMessage{queueGuardWire("host-to-worker", "request", 1, subprocess.MethodInit, map[string]any{}, nil), queueGuardWire("worker-to-host", "response", 1, "", nil, map[string]any{}), queueGuardWire("host-to-worker", "request", 2, subprocess.MethodLoad, map[string]any{}, nil), queueGuardWire("worker-to-host", "response", 2, "", nil, map[string]any{}), queueGuardEvent(map[string]any{"kind": "entered", "id": 2, "name": "load", "deadline": true}), queueGuardEvent(map[string]any{"kind": "returned", "id": 2}), queueGuardWire("host-to-worker", "request", p.CommandID, subprocess.MethodCommandExecute, map[string]any{"name": "get", "args": p.Args, "session_id": "", "context": map[string]any{"timeout_ms": 9000, "binding_id": p.Binding}}, nil), queueGuardEvent(map[string]any{"kind": "entered", "id": p.CommandID, "name": "get", "deadline": true})}
+	for i := 1; i <= 5; i++ {
+		events = append(events, queueGuardEvent(map[string]any{"kind": "control_received", "seq": i}))
+	}
+	events = append(events, queueGuardEvent(map[string]any{"kind": "snapshot", "effects": p.SnapshotOrdinary}), queueGuardEvent(map[string]any{"kind": "snapshot", "effects": p.SnapshotControl}))
+	var outputs []map[string]json.RawMessage
+	for i := 0; i < 21; i++ {
+		id := uint64(17 + i)
+		if i >= 13 {
+			id = uint64(103 + i - 13)
+		} else {
+			p.Initial = append(p.Initial, id)
+		}
+		input := queueGuardWire("host-to-worker", "request", id, subprocess.MethodHealth, map[string]any{}, nil)
+		var n int
+		_ = json.Unmarshal(input["bytes"], &n)
+		p.Health[id] = interopChildCredit{id, n, true, true, true, true}
+		events = append(events, input)
+		output := queueGuardWire("worker-to-host", "response", id, "", nil, map[string]any{"ok": true})
+		outputs = append(outputs, output)
+		if i == 0 {
+			_ = json.Unmarshal(output["bytes"], &p.WaitingBytes)
+		}
+	}
+	events = append(events, queueGuardEvent(map[string]any{"kind": "writer_waiting", "bytes": p.WaitingBytes}))
+	// Four controls then one ordinary request, followed by alternating work. The
+	// remainder follows all ordinary requests and cannot starve that lane.
+	var ordered []map[string]json.RawMessage
+	ordered = append(ordered, outputs[:4]...)
+	for i := 0; i < 8; i++ {
+		id := uint64(201 + i)
+		request := queueGuardWire("worker-to-host", "request", id, "host/storage/get", map[string]any{"grant_id": "g-StorageGet", "key": "read", "context": map[string]any{"timeout_ms": 4000, "binding_id": p.Binding, "parent_call": map[string]any{"request_owner": "host", "id": p.CommandID}}}, nil)
+		ordered = append(ordered, request, outputs[4+i])
+		events = append(events, queueGuardWire("host-to-worker", "response", id, "", nil, map[string]any{"found": false}), queueGuardEvent(map[string]any{"kind": "helper_done", "id": p.CommandID, "index": i, "failure": map[string]any{"code": "ok"}}))
+		p.Backend = append(p.Backend, HostAuthority{Parent: subprocess.ParentCall{RequestOwner: subprocess.HostRPCOwnerHost, ID: p.CommandID}, BindingID: subprocess.BindingID(p.Binding), Grant: capability.Grant{GrantID: "g-StorageGet"}, Method: HostStorageGet, Deadline: time.Now().Add(time.Minute)})
+	}
+	ordered = append(ordered, outputs[12:]...)
+	var outcomes []interopHelperOutcome
+	for i := 0; i < 8; i++ {
+		outcomes = append(outcomes, interopHelperOutcome{Code: "ok"})
+	}
+	content, _ := json.Marshal(outcomes)
+	ordered = append(ordered, queueGuardWire("worker-to-host", "response", p.CommandID, "", nil, subprocess.CommandExecResult{Content: string(content)}))
+	refill := 0
+	for i, e := range ordered {
+		e["child_output_sequence"], _ = json.Marshal(i + 1)
+		var id uint64
+		_ = json.Unmarshal(e["id"], &id)
+		if rawEventString(e, "frame_type") == "response" && id != p.CommandID && refill < 8 {
+			p.Intents[refill] = refill
+			p.Refills = append(p.Refills, interopChildRefill{refill, id, uint64(i + 1), uint64(103 + refill), p.Health[id]})
+			refill++
+		}
+	}
+	events = append(events, ordered...)
+	events = append(events, queueGuardEvent(map[string]any{"kind": "returned", "id": p.CommandID}), queueGuardEvent(map[string]any{"kind": "unload_started"}), queueGuardEvent(map[string]any{"kind": "finished", "effects": map[string]int{"entered": 2, "load": 1, "get": 1, "returned": 1, "health": 21, "unload_attempts": 1}}), queueGuardEvent(map[string]any{"kind": "worker_exit", "exit_code": 0}))
+	return p, events
+}
+
+func TestInteropChildFairnessCompleteOwnershipAndRetirement(t *testing.T) {
+	proof, events := childGuardFixture()
+	if err := proof.guard(events, 0); err != nil {
+		t.Fatal("canonical", err)
+	}
+	// Consumer observation order is irrelevant to physical worker stream order.
+	for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
+		events[i], events[j] = events[j], events[i]
+	}
+	c := &interopControls{childProof: proof, observed: events, events: make(chan map[string]json.RawMessage), failure: make(chan error, 1), expandedReverseLimit: 8}
+	auditInteropChildCopies(t, c)
+	c.failure <- io.EOF
+	if err := c.finish(0); err != nil {
+		t.Fatal("legal reordered trace", err)
 	}
 }

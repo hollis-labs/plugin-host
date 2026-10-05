@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -432,4 +433,332 @@ func (p *interopHungProof) guard(events []map[string]json.RawMessage, exit int) 
 		}
 	}
 	return filtered, nil
+}
+
+// Selected child fairness owns every input and no cancellation action. Worker
+// stdout order is assigned at socket ingress, before consumers can reorder it.
+func (p *interopChildProof) guard(events []map[string]json.RawMessage, exit int) error {
+	fail := func() error { return errors.New("harness child fairness ownership/physical receipt") }
+	if p == nil || p.Ref != p.expected || p.Ref.Run == "" || p.Ref.Scenario != "child-fairness" || p.Ref.Profile != "expanded" || exit != 0 || !p.EOF || !p.CustodyRetired || p.CommandID == 0 || p.Binding == "" || len(p.Initial) != 13 || len(p.Health) != 21 || len(p.Refills) != 8 || p.Initial[0] != p.BarrierID || p.ArmSequence <= 0 || p.ReleaseSequence <= p.ArmSequence || p.WaitingBytes <= 0 {
+		return fail()
+	}
+	if p.SnapshotOrdinary["ordinary_queued"] != 8 || p.SnapshotControl["control_queued"] != 12 || p.SnapshotControl["reserved_frames"]+12 > 32 || p.SnapshotControl["reserved_bytes"] != p.SnapshotControl["reserved_frames"]*1024 {
+		return fail()
+	}
+	peak := 0
+	for _, v := range p.Occupancy {
+		if v.Ordinary < 0 || v.Ordinary > 14 || v.Reverse < 0 || v.Reverse > 8 || v.Credits < 0 || v.Credits > 32 {
+			return fail()
+		}
+		peak = max(peak, v.Ordinary)
+	}
+	if peak != 14 || len(p.Backend) != 8 {
+		return fail()
+	}
+	for _, a := range p.Backend {
+		if a.Parent.ID != p.CommandID || a.Parent.RequestOwner != "host" || string(a.BindingID) != p.Binding || a.Grant.GrantID != "g-StorageGet" || a.Method != HostStorageGet || a.Deadline.IsZero() {
+			return fail()
+		}
+	}
+	owned := map[uint64]bool{}
+	for _, id := range p.Initial {
+		if id == 0 || id == p.CommandID || owned[id] {
+			return fail()
+		}
+		owned[id] = true
+	}
+	triggers := map[uint64]interopChildRefill{}
+	for i, r := range p.Refills {
+		if p.Intents[i] != i || r.Index != i || r.NewID == 0 || r.NewID == p.CommandID || owned[r.NewID] || !owned[r.TriggerID] || triggers[r.TriggerSequence].NewID != 0 || r.Credit != p.Health[r.TriggerID] || r.Credit.ID != r.TriggerID {
+			return fail()
+		}
+		owned[r.NewID] = true
+		triggers[r.TriggerSequence] = r
+	}
+	for id, credit := range p.Health {
+		if !owned[id] || credit.ID != id || !credit.WholeInput || !credit.LocalOK || !credit.Released || !credit.CreditRetired || credit.InputBytes <= 0 {
+			return fail()
+		}
+	}
+	acks := map[int]int{}
+	snapshots := map[string]bool{}
+	counts := map[string]int{}
+	healthInputs := map[uint64]int{}
+	var outputs []map[string]json.RawMessage
+	loadEntered, loadReturned, cleanup := 0, 0, 0
+	entered, returned, helpers, finished, waiting := 0, 0, map[int]bool{}, 0, 0
+	for _, e := range events {
+		kind := rawEventString(e, "kind")
+		var id uint64
+		_ = json.Unmarshal(e["id"], &id)
+		switch kind {
+		case "control_received":
+			var seq int
+			if json.Unmarshal(e["seq"], &seq) != nil || seq < 1 || seq > 64 {
+				return fail()
+			}
+			acks[seq]++
+		case "snapshot":
+			var v map[string]int
+			if json.Unmarshal(e["effects"], &v) != nil {
+				return fail()
+			}
+			if fmt.Sprint(v) == fmt.Sprint(p.SnapshotOrdinary) {
+				snapshots["ordinary"] = true
+			}
+			if fmt.Sprint(v) == fmt.Sprint(p.SnapshotControl) {
+				snapshots["control"] = true
+			}
+		case "writer_waiting":
+			var n int
+			if json.Unmarshal(e["bytes"], &n) != nil || n != p.WaitingBytes {
+				return fail()
+			}
+			waiting++
+		case "entered":
+			if id == p.Lifecycle[subprocess.MethodLoad] {
+				var d bool
+				if rawEventString(e, "name") != "load" || json.Unmarshal(e["deadline"], &d) != nil || !d {
+					return fail()
+				}
+				loadEntered++
+			}
+			if id != p.CommandID && id != p.Lifecycle[subprocess.MethodLoad] {
+				return fail()
+			}
+			if id == p.CommandID {
+				var deadline bool
+				if rawEventString(e, "name") != "get" || json.Unmarshal(e["deadline"], &deadline) != nil || !deadline {
+					return fail()
+				}
+				entered++
+			}
+		case "returned":
+			if id == p.Lifecycle[subprocess.MethodLoad] {
+				loadReturned++
+			}
+			if id != p.CommandID && id != p.Lifecycle[subprocess.MethodLoad] {
+				return fail()
+			}
+			if id == p.CommandID {
+				returned++
+			}
+		case "helper_done":
+			var index int
+			var result interopHelperOutcome
+			if id != p.CommandID || json.Unmarshal(e["index"], &index) != nil || index < 0 || index >= 8 || helpers[index] || json.Unmarshal(e["failure"], &result) != nil || result.Code != "ok" {
+				return fail()
+			}
+			helpers[index] = true
+		case "unload_started":
+			cleanup++
+		case "finished":
+			var v map[string]int
+			if json.Unmarshal(e["effects"], &v) != nil || v["entered"] != 2 || v["load"] != 1 || v["get"] != 1 || v["returned"] != 1 || v["health"] != 21 || v["unload_attempts"] != 1 || v["commits"] != 0 || rawEventString(e, "transport_error") != "" {
+				return fail()
+			}
+			finished++
+		case "wire":
+			dir, typ, method := rawEventString(e, "direction"), rawEventString(e, "frame_type"), rawEventString(e, "method")
+			if typ == "notification" {
+				return fail()
+			}
+			var frame struct {
+				Version string                     `json:"jsonrpc"`
+				ID      uint64                     `json:"id"`
+				Params  map[string]json.RawMessage `json:"params"`
+				Result  json.RawMessage            `json:"result"`
+				Error   json.RawMessage            `json:"error"`
+			}
+			raw := []byte(rawEventString(e, "raw"))
+			if dir == "host-to-worker" && typ == "request" && method == subprocess.MethodInit {
+				if id != p.Lifecycle[method] {
+					return fail()
+				}
+				counts[method]++
+				continue
+			}
+			var bytes int
+			if json.Unmarshal(raw, &frame) != nil || frame.ID != id || frame.Version != "2.0" || json.Unmarshal(e["bytes"], &bytes) != nil || bytes != len(raw) {
+				return fail()
+			}
+			if dir == "host-to-worker" && typ == "response" {
+				var v map[string]json.RawMessage
+				var found bool
+				if len(frame.Error) > 0 || json.Unmarshal(frame.Result, &v) != nil || json.Unmarshal(v["found"], &found) != nil || found || len(v) != 1 {
+					return fail()
+				}
+			}
+			if dir == "host-to-worker" && typ == "request" {
+				counts[method]++
+				switch method {
+				case subprocess.MethodInit, subprocess.MethodLoad:
+					if id != p.Lifecycle[method] {
+						return fail()
+					}
+				case subprocess.MethodHealth:
+					if !owned[id] || string(frame.Params["context"]) != "" || len(frame.Params) != 0 || bytes != p.Health[id].InputBytes {
+						return fail()
+					}
+					healthInputs[id]++
+				case subprocess.MethodCommandExecute:
+					var name, args string
+					var ctx struct {
+						Binding string `json:"binding_id"`
+						Timeout uint64 `json:"timeout_ms"`
+					}
+					if id != p.CommandID || json.Unmarshal(frame.Params["name"], &name) != nil || name != "get" || json.Unmarshal(frame.Params["args"], &args) != nil || args != p.Args || json.Unmarshal(frame.Params["context"], &ctx) != nil || ctx.Binding != p.Binding || ctx.Timeout == 0 || ctx.Timeout > 10000 {
+						return fail()
+					}
+					var a struct {
+						N   int    `json:"n"`
+						Key string `json:"key"`
+					}
+					if json.Unmarshal([]byte(args), &a) != nil || a.N != 8 || a.Key != "read" {
+						return fail()
+					}
+				default:
+					return fail()
+				}
+			}
+			if dir == "worker-to-host" {
+				var sequence uint64
+				_ = json.Unmarshal(e["child_output_sequence"], &sequence)
+				if sequence > 0 {
+					outputs = append(outputs, e)
+				} else if typ == "request" || id == p.CommandID || owned[id] {
+					return fail()
+				}
+				if typ == "response" && id == p.CommandID {
+					var v subprocess.CommandExecResult
+					if len(frame.Error) > 0 || json.Unmarshal(frame.Result, &v) != nil {
+						return fail()
+					}
+					var outcomes []interopHelperOutcome
+					if json.Unmarshal([]byte(v.Content), &outcomes) != nil || len(outcomes) != 8 {
+						return fail()
+					}
+					for _, v := range outcomes {
+						if v.Code != "ok" {
+							return fail()
+						}
+					}
+				}
+				if typ == "response" && owned[id] {
+					var r struct {
+						OK bool `json:"ok"`
+					}
+					if len(frame.Error) > 0 || json.Unmarshal(frame.Result, &r) != nil || !r.OK {
+						return fail()
+					}
+				}
+			}
+		}
+	}
+	if loadEntered != 1 || loadReturned != 1 || cleanup != 1 {
+		return fail()
+	}
+	if len(p.ControlTrace) < 5 || len(p.ControlTrace) > 64 || len(acks) != len(p.ControlTrace) || !snapshots["ordinary"] || !snapshots["control"] {
+		return fail()
+	}
+	for i, line := range p.ControlTrace {
+		parts := strings.Split(line, "/ack:")
+		var seq int
+		if len(parts) != 2 || json.Unmarshal([]byte(parts[1]), &seq) != nil || seq != i+1 || acks[seq] != 1 {
+			return fail()
+		}
+		if i == 0 && parts[0] != "release:request-2" {
+			return fail()
+		}
+		if p.ArmSequence != 2 || p.ReleaseSequence != len(p.ControlTrace) {
+			return fail()
+		}
+		if seq > p.ArmSequence && seq < p.ReleaseSequence && parts[0] != "release:snapshot" {
+			return fail()
+		}
+		if seq == p.ArmSequence && parts[0] != "release:arm-writer" {
+			return fail()
+		}
+		if seq == p.ReleaseSequence && parts[0] != "release:writer" {
+			return fail()
+		}
+	}
+	if entered != 1 || returned != 1 || len(helpers) != 8 || finished != 1 || waiting != 1 || counts[subprocess.MethodInit] != 1 || counts[subprocess.MethodLoad] != 1 || counts[subprocess.MethodCommandExecute] != 1 || counts[subprocess.MethodHealth] != 21 {
+		return fail()
+	}
+	for id := range owned {
+		if healthInputs[id] != 1 {
+			return fail()
+		}
+	}
+	sequenceOf := func(e map[string]json.RawMessage) uint64 {
+		var n uint64
+		_ = json.Unmarshal(e["child_output_sequence"], &n)
+		return n
+	}
+	sort.Slice(outputs, func(i, j int) bool { return sequenceOf(outputs[i]) < sequenceOf(outputs[j]) })
+	if len(outputs) != 30 {
+		return fail()
+	}
+	ordinary, burst, command, refills := 0, 0, 0, 0
+	completed := map[uint64]bool{}
+	for i, e := range outputs {
+		seq := sequenceOf(e)
+		if seq != uint64(i+1) {
+			return fail()
+		}
+		var id uint64
+		_ = json.Unmarshal(e["id"], &id)
+		switch rawEventString(e, "frame_type") {
+		case "request":
+			var v struct {
+				Params struct {
+					Context struct {
+						Timeout uint64 `json:"timeout_ms"`
+					} `json:"context"`
+				} `json:"params"`
+			}
+			if json.Unmarshal([]byte(rawEventString(e, "raw")), &v) != nil || v.Params.Context.Timeout == 0 || v.Params.Context.Timeout > 10000 {
+				return fail()
+			}
+			if rawEventString(e, "method") != "host/storage/get" {
+				return fail()
+			}
+			ordinary++
+			burst = 0
+		case "response":
+			if id == p.CommandID {
+				command++
+				continue
+			}
+			if !owned[id] || completed[id] {
+				return fail()
+			}
+			if id == p.BarrierID {
+				var n int
+				_ = json.Unmarshal(e["bytes"], &n)
+				if n != p.WaitingBytes || seq != 1 {
+					return fail()
+				}
+			}
+			completed[id] = true
+			burst++
+			if ordinary < 8 && burst > 4 {
+				return fail()
+			}
+			if refills < 8 {
+				r, ok := triggers[seq]
+				if !ok || r.TriggerID != id || r.Index != refills {
+					return fail()
+				}
+				refills++
+			}
+		default:
+			return fail()
+		}
+	}
+	if ordinary != 8 || command != 1 || len(completed) != 21 || refills != 8 {
+		return fail()
+	}
+	return interopExpandedHelpers(events, 8)
 }
