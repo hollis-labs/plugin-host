@@ -317,6 +317,7 @@ func (w *interopEventWriter) failure() error {
 
 type interopControls struct {
 	queueProof           *interopQueueProof
+	hungProof            *interopHungProof
 	privatePlan          *interopPrivatePlan
 	privateWrites        []interopWriteWitness
 	hostCancelEvidence   map[uint64]interopHostCancelEvidence
@@ -448,7 +449,7 @@ func (c *interopControls) finish(expectedCode int) error {
 					}
 				}
 			}
-			if !errors.Is(err, io.EOF) {
+			if !errors.Is(err, io.EOF) || (c.hungProof != nil && err != io.EOF) { //nolint:errorlint // A joined EOF also carries a fatal selected-case observer failure.
 				return fmt.Errorf("harness terminal observer: %w", err)
 			}
 			exits, finished := 0, 0
@@ -475,7 +476,16 @@ func (c *interopControls) finish(expectedCode int) error {
 					return guardErr
 				}
 			}
-			if err := interopWireTerminals(wireEvents, expectedCode, c.hostCancelEvidence); err != nil {
+			terminalExit := expectedCode
+			if c.hungProof != nil {
+				var guardErr error
+				wireEvents, guardErr = c.hungProof.guard(wireEvents, expectedCode)
+				if guardErr != nil {
+					return guardErr
+				}
+				terminalExit = 0 // Only the selected hung input was removed; lifecycle terminals are mandatory.
+			}
+			if err := interopWireTerminals(wireEvents, terminalExit, c.hostCancelEvidence); err != nil {
 				return err
 			}
 			if c.expandedReverseLimit != 0 {

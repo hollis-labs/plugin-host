@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hollis-labs/plugin-host/internal/strictjson"
+	"github.com/hollis-labs/plugin-sdk/subprocess"
 )
 
 // The observer forwards every worker stdout byte unchanged. It records bounded
@@ -354,4 +355,81 @@ func interopWireNotifications(events []map[string]json.RawMessage, hostEvidence 
 		}
 	}
 	return nil
+}
+
+func (p *interopHungProof) guard(events []map[string]json.RawMessage, exit int) ([]map[string]json.RawMessage, error) {
+	fail := func() ([]map[string]json.RawMessage, error) {
+		return nil, errors.New("harness hung owned input/exit proof")
+	}
+	if p == nil || p.Ref != p.expected || p.Ref.Run == "" || p.Ref.Scenario != "hung-callback" || p.Ref.Profile != "expanded-hung" || p.CommandID == 0 || !p.HalfClosed || !p.LocalCompleted || !p.CustodyRetired || exit != 1 {
+		return fail()
+	}
+	counts := map[string]int{}
+	entered, finished := 0, 0
+	var filtered []map[string]json.RawMessage
+	for _, e := range events {
+		kind := rawEventString(e, "kind")
+		var id uint64
+		_ = json.Unmarshal(e["id"], &id)
+		if kind == "entered" && id == p.CommandID {
+			var deadline bool
+			if rawEventString(e, "name") != "hung" || json.Unmarshal(e["deadline"], &deadline) != nil || deadline {
+				return fail()
+			}
+			entered++
+		}
+		if (kind == "returned" && id == p.CommandID) || kind == "helper_done" {
+			return fail()
+		}
+		if kind == "finished" {
+			var effects map[string]int
+			if json.Unmarshal(e["effects"], &effects) != nil || effects["entered"] != 2 || effects["load"] != 1 || effects["hung"] != 1 || effects["unload_attempts"] != 0 || effects["returned"] != 0 || effects["commits"] != 0 || effects["health"] != 0 || rawEventString(e, "transport_error") == "" {
+				return fail()
+			}
+			finished++
+		}
+		if kind == "wire" {
+			typ, dir := rawEventString(e, "frame_type"), rawEventString(e, "direction")
+			if typ == "notification" || (typ == "request" && dir == "worker-to-host") {
+				return fail()
+			}
+			if typ == "request" && dir == "host-to-worker" {
+				method := rawEventString(e, "method")
+				switch method {
+				case subprocess.MethodInit, subprocess.MethodLoad:
+				case subprocess.MethodCommandExecute:
+					var frame struct {
+						ID     uint64                     `json:"id"`
+						Params map[string]json.RawMessage `json:"params"`
+					}
+					if id != p.CommandID || json.Unmarshal([]byte(rawEventString(e, "raw")), &frame) != nil || frame.ID != id {
+						return fail()
+					}
+					var name, args, session string
+					if json.Unmarshal(frame.Params["name"], &name) != nil || json.Unmarshal(frame.Params["args"], &args) != nil || json.Unmarshal(frame.Params["session_id"], &session) != nil || name != "hung" || args != "{}" || session != "" || len(frame.Params) != 3 {
+						return fail()
+					}
+				default:
+					return fail()
+				}
+				counts[method]++
+			}
+			if id == p.CommandID && dir == "worker-to-host" && typ == "response" {
+				return fail()
+			}
+			if id == p.CommandID && dir == "host-to-worker" && typ == "request" {
+				continue
+			}
+		}
+		filtered = append(filtered, e)
+	}
+	if entered != 1 || finished != 1 {
+		return fail()
+	}
+	for _, m := range []string{subprocess.MethodInit, subprocess.MethodLoad, subprocess.MethodCommandExecute} {
+		if counts[m] != 1 {
+			return fail()
+		}
+	}
+	return filtered, nil
 }

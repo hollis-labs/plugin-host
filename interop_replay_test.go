@@ -541,7 +541,7 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 				observations = append(observations, observation)
 				continue
 			}
-			supported := recipe.Scenario == "clip" || recipe.Scenario == "queue" || recipe.Scenario == "queue-frames" || recipe.Scenario == "reverse" || recipe.Scenario == "effects" || recipe.Scenario == "unknown" || recipe.Scenario == "overflow" || recipe.Scenario == "cleanup-error" || recipe.Scenario == "cleanup-panic" || recipe.Scenario == "cleanup-hung" || recipe.Scenario == "receipt-restart" || recipe.Scenario == "descendants" || recipe.Scenario == "deadline" || recipe.Scenario == "host-fairness"
+			supported := recipe.Scenario == "hung-callback" || recipe.Scenario == "clip" || recipe.Scenario == "queue" || recipe.Scenario == "queue-frames" || recipe.Scenario == "reverse" || recipe.Scenario == "effects" || recipe.Scenario == "unknown" || recipe.Scenario == "overflow" || recipe.Scenario == "cleanup-error" || recipe.Scenario == "cleanup-panic" || recipe.Scenario == "cleanup-hung" || recipe.Scenario == "receipt-restart" || recipe.Scenario == "descendants" || recipe.Scenario == "deadline" || recipe.Scenario == "host-fairness"
 			if !supported {
 				observation["status"] = "pending"
 				observation["owner"] = "plugin-host interop adapter (slice5)"
@@ -564,6 +564,8 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 					p, c = startInteropExpanded(t, runtime, recipe, b)
 				}
 				switch recipe.Scenario {
+				case "hung-callback":
+					replayInteropHung(t, p, c, b, runtime, recipe, observation)
 				case "clip", "queue", "queue-frames":
 					replayInteropQueue(t, p, c, b, runtime, recipe, observation)
 				case "deadline":
@@ -638,7 +640,7 @@ func TestSDKManifestExpandedReplay(t *testing.T) {
 				observation["worker_command_env"] = p.spec.Env
 				observation["bridge_command"] = p.spec.Command
 				observation["bridge_args"] = p.spec.Args
-				if recipe.Scenario != "deadline" && recipe.Scenario != "host-fairness" {
+				if recipe.Scenario != "deadline" && recipe.Scenario != "host-fairness" && recipe.Scenario != "hung-callback" {
 					observation["projection"] = "Actual Init+Load lifecycle and host-minted binding; command IDs follow lifecycle; authored expanded 10000ms method ceilings"
 				}
 				if recipe.Scenario == "cleanup-hung" {
