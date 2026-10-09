@@ -1,10 +1,21 @@
 # plugin-host
 
-> **Deprecated standalone Go module.** New development and protocol-2 releases
-> live in [libs/plugin-mcp](https://github.com/hollis-labs/libs/tree/main/plugin-mcp).
-> Install `github.com/hollis-labs/libs/plugin-mcp@v0.1.0` and import its
-> `plugin-host` package. Existing standalone tags and history remain available;
-> there will be no separate protocol-2 release from this repository.
+## Maintenance moved to `github.com/hollis-labs/libs/plugin-mcp`
+
+This standalone repository is retired. Maintained source and documentation are
+in [github.com/hollis-labs/libs/plugin-mcp/plugin-host](https://github.com/hollis-labs/libs/tree/plugin-mcp%2Fv0.1.1/plugin-mcp/plugin-host), released in **`plugin-mcp/v0.1.1`**.
+Install the replacement module:
+
+```sh
+go get github.com/hollis-labs/libs/plugin-mcp@v0.1.1
+```
+
+Replace the `github.com/hollis-labs/plugin-host` import prefix with
+`github.com/hollis-labs/libs/plugin-mcp/plugin-host`, retaining the package subpath. Review the replacement documentation
+for any API changes before migrating. Existing standalone tags and history remain
+available; old module pins do not automatically redirect to the new module.
+
+The documentation below describes historical standalone usage.
 
 Host-side driver for [plugin-sdk](https://github.com/hollis-labs/plugin-sdk)'s stdio JSON-RPC protocol: spawn a plugin, handshake, make id-correlated calls, restart it when it crashes, and stop it within bounded time.
 
