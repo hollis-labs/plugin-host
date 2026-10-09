@@ -1,16 +1,39 @@
 # plugin-host
 
+> **Deprecated standalone Go module.** New development and protocol-2 releases
+> live in [libs/plugin-mcp](https://github.com/hollis-labs/libs/tree/main/plugin-mcp).
+> Install `github.com/hollis-labs/libs/plugin-mcp@v0.1.0` and import its
+> `plugin-host` package. Existing standalone tags and history remain available;
+> there will be no separate protocol-2 release from this repository.
+
 Host-side driver for [plugin-sdk](https://github.com/hollis-labs/plugin-sdk)'s stdio JSON-RPC protocol: spawn a plugin, handshake, make id-correlated calls, restart it when it crashes, and stop it within bounded time.
 
 ## Status
 
-**Pre-release.** This project is unreleased, not deployed, and has no outside consumers. It's being built in the open: the code, the docs, and this README describe what exists today, not a pitch for what's planned. Interfaces and behavior change without notice, and there are no compatibility guarantees yet.
+This repository retains the standalone host history. Its `v0.1.2` tag predates
+the consolidated protocol-2 reverse-RPC and lifecycle work. Use the released
+`libs/plugin-mcp` module for that work. The examples below describe historical
+standalone import paths and must be updated when migrating.
 
 ## Install
 
 ```sh
-go get github.com/hollis-labs/plugin-host
+go get github.com/hollis-labs/libs/plugin-mcp@v0.1.0
 ```
+
+Migrate both host and SDK imports together; their Go types belong to the same
+consolidated module:
+
+```go
+import pluginhost "github.com/hollis-labs/libs/plugin-mcp/plugin-host"
+import "github.com/hollis-labs/libs/plugin-mcp/plugin-sdk/subprocess"
+import "github.com/hollis-labs/libs/plugin-mcp/plugin-sdk/capability"
+```
+
+Apply the SDK prefix to any additional subpackages. An import migration does
+not create host authority or fill in the required protocol-2 Init fields;
+provide genuine owner-issued identity, roots and grants, and follow the
+consolidated module's handshake and lifecycle guidance.
 
 ## Usage
 
